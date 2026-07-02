@@ -11,8 +11,8 @@ type LagSample struct {
 }
 
 type LagTracker struct {
-	mu       sync.RWMutex
-	samples  map[string][]LagSample
+	mu         sync.RWMutex
+	samples    map[string][]LagSample
 	maxSamples int
 }
 

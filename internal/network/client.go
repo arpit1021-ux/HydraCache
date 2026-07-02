@@ -10,11 +10,11 @@ import (
 )
 
 type Client struct {
-	addr    string
-	conn    net.Conn
-	reader  *bufio.Reader
-	writer  *bufio.Writer
-	mu      sync.Mutex
+	addr      string
+	conn      net.Conn
+	reader    *bufio.Reader
+	writer    *bufio.Writer
+	mu        sync.Mutex
 	connected bool
 }
 

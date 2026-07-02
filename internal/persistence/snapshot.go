@@ -12,9 +12,9 @@ import (
 
 type SnapshotData struct {
 	Entries   map[string]SnapshotEntry `json:"entries"`
-	Seq       int64                     `json:"seq"`
+	Seq       int64                    `json:"seq"`
 	Timestamp time.Time                `json:"timestamp"`
-	NodeID    string                    `json:"node_id"`
+	NodeID    string                   `json:"node_id"`
 }
 
 type SnapshotEntry struct {

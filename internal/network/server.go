@@ -15,15 +15,15 @@ import (
 )
 
 type Server struct {
-	addr       string
-	listener   net.Listener
-	cache      cache.Cache
-	maxConns   int
-	sem        chan struct{}
-	wg         sync.WaitGroup
-	connCount  atomic.Int64
-	handler    *Handler
-	quit       chan struct{}
+	addr      string
+	listener  net.Listener
+	cache     cache.Cache
+	maxConns  int
+	sem       chan struct{}
+	wg        sync.WaitGroup
+	connCount atomic.Int64
+	handler   *Handler
+	quit      chan struct{}
 }
 
 type ServerConfig struct {

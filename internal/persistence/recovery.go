@@ -6,9 +6,9 @@ import (
 )
 
 type Recoverer struct {
-	wal        *WAL
+	wal         *WAL
 	snapshotter *Snapshotter
-	recovered  bool
+	recovered   bool
 }
 
 func NewRecoverer(wal *WAL, snapshotter *Snapshotter) *Recoverer {

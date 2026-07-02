@@ -14,8 +14,8 @@ func shortID2(id string) string {
 }
 
 type Membership struct {
-	mu      sync.RWMutex
-	members map[string]*Member
+	mu       sync.RWMutex
+	members  map[string]*Member
 	onChange func(MembershipEvent)
 }
 

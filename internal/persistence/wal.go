@@ -13,12 +13,12 @@ import (
 )
 
 type WALEntry struct {
-	Seq      int64
-	Cmd      string
-	Args     []string
-	Key      string
-	Value    []byte
-	TTL      int64
+	Seq       int64
+	Cmd       string
+	Args      []string
+	Key       string
+	Value     []byte
+	TTL       int64
 	Timestamp int64
 }
 

@@ -3,13 +3,13 @@ package cache
 import "time"
 
 type Entry struct {
-	Key        string
-	Value      []byte
-	Flags      int64
-	ExpiresAt  int64
-	CreatedAt  int64
+	Key         string
+	Value       []byte
+	Flags       int64
+	ExpiresAt   int64
+	CreatedAt   int64
 	AccessCount int64
-	Size       int64
+	Size        int64
 }
 
 func NewEntry(key string, value []byte, ttl time.Duration) *Entry {

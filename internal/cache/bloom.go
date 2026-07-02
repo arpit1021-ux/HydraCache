@@ -6,11 +6,11 @@ import (
 )
 
 type BloomFilter struct {
-	mu       sync.RWMutex
-	bits     []bool
-	size     uint
+	mu        sync.RWMutex
+	bits      []bool
+	size      uint
 	hashFuncs int
-	count    uint
+	count     uint
 }
 
 func NewBloomFilter(expectedItems int, falsePositiveRate float64) *BloomFilter {

@@ -7,18 +7,18 @@ import (
 )
 
 type RebalanceStatus struct {
-	SourceNode  string         `json:"source_node"`
-	TargetNode  string         `json:"target_node"`
-	TotalKeys   int            `json:"total_keys"`
-	MigratedKeys int64         `json:"migrated_keys"`
-	Complete    bool           `json:"complete"`
+	SourceNode   string `json:"source_node"`
+	TargetNode   string `json:"target_node"`
+	TotalKeys    int    `json:"total_keys"`
+	MigratedKeys int64  `json:"migrated_keys"`
+	Complete     bool   `json:"complete"`
 }
 
 type Rebalancer struct {
-	ring    *HashRing
-	status  map[string]*RebalanceStatus
-	mu      sync.RWMutex
-	onKey   func(key, targetNode string) error
+	ring   *HashRing
+	status map[string]*RebalanceStatus
+	mu     sync.RWMutex
+	onKey  func(key, targetNode string) error
 }
 
 func NewRebalancer(ring *HashRing, onKey func(key, targetNode string) error) *Rebalancer {

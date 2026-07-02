@@ -49,18 +49,18 @@ func (h Health) String() string {
 }
 
 type Node struct {
-	ID        string    `json:"id"`
-	Address   string    `json:"address"`
-	Role      Role      `json:"role"`
-	Health    Health    `json:"health"`
-	Region    string    `json:"region"`
-	Version   string    `json:"version"`
-	Load      float64   `json:"load"`
-	MemoryMB  int64     `json:"memory_mb"`
-	LastSeen  time.Time `json:"last_seen"`
-	JoinedAt  time.Time `json:"joined_at"`
-	Epoch     uint64    `json:"epoch"`
-	IsReplicaOf string  `json:"is_replica_of,omitempty"`
+	ID          string    `json:"id"`
+	Address     string    `json:"address"`
+	Role        Role      `json:"role"`
+	Health      Health    `json:"health"`
+	Region      string    `json:"region"`
+	Version     string    `json:"version"`
+	Load        float64   `json:"load"`
+	MemoryMB    int64     `json:"memory_mb"`
+	LastSeen    time.Time `json:"last_seen"`
+	JoinedAt    time.Time `json:"joined_at"`
+	Epoch       uint64    `json:"epoch"`
+	IsReplicaOf string    `json:"is_replica_of,omitempty"`
 }
 
 func NewNode(id, address string) *Node {

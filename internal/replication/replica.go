@@ -15,19 +15,19 @@ func shortID(id string) string {
 }
 
 type ReplicaSet struct {
-	mu        sync.RWMutex
-	primaryID string
-	replicas  map[string]*ReplicaInfo
+	mu         sync.RWMutex
+	primaryID  string
+	replicas   map[string]*ReplicaInfo
 	lagTracker *LagTracker
 }
 
 type ReplicaInfo struct {
-	NodeID    string
-	Address   string
-	Status    ReplicaStatus
-	LagSeq    int64
-	LastSync  time.Time
-	Stream    *ReplicationStream
+	NodeID   string
+	Address  string
+	Status   ReplicaStatus
+	LagSeq   int64
+	LastSync time.Time
+	Stream   *ReplicationStream
 }
 
 type ReplicaStatus int
@@ -66,10 +66,10 @@ func (rs *ReplicaSet) AddReplica(nodeID, address string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	rs.replicas[nodeID] = &ReplicaInfo{
-		NodeID:   nodeID,
-		Address:  address,
-		Status:   ReplicaSyncing,
-		Stream:   NewReplicationStream(10000),
+		NodeID:  nodeID,
+		Address: address,
+		Status:  ReplicaSyncing,
+		Stream:  NewReplicationStream(10000),
 	}
 	log.Printf("[replication] added replica %s to primary %s", shortID(nodeID), shortID(rs.primaryID))
 }

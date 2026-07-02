@@ -29,20 +29,20 @@ func (s State) String() string {
 }
 
 type Election struct {
-	mu              sync.RWMutex
-	selfID          string
-	state           State
-	term            uint64
-	votedFor        string
-	votesReceived   map[string]bool
-	quorum          int
-	clusterSize     int
-	lastHeartbeat   time.Time
-	electionTimeout time.Duration
+	mu                sync.RWMutex
+	selfID            string
+	state             State
+	term              uint64
+	votedFor          string
+	votesReceived     map[string]bool
+	quorum            int
+	clusterSize       int
+	lastHeartbeat     time.Time
+	electionTimeout   time.Duration
 	heartbeatInterval time.Duration
-	onBecomeLeader  func()
-	onLoseLeadership func()
-	stopCh          chan struct{}
+	onBecomeLeader    func()
+	onLoseLeadership  func()
+	stopCh            chan struct{}
 }
 
 func New(selfID string, clusterSize int) *Election {

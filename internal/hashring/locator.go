@@ -1,7 +1,7 @@
 package hashring
 
 type Locator struct {
-	ring         *HashRing
+	ring              *HashRing
 	replicationFactor int
 }
 

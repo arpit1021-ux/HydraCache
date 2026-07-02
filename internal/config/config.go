@@ -7,18 +7,18 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Cache    CacheConfig    `yaml:"cache"`
-	Cluster  ClusterConfig  `yaml:"cluster"`
-	WAL      WALConfig      `yaml:"wal"`
-	Log      LogConfig      `yaml:"log"`
-	HTTP     HTTPConfig     `yaml:"http"`
+	Server  ServerConfig  `yaml:"server"`
+	Cache   CacheConfig   `yaml:"cache"`
+	Cluster ClusterConfig `yaml:"cluster"`
+	WAL     WALConfig     `yaml:"wal"`
+	Log     LogConfig     `yaml:"log"`
+	HTTP    HTTPConfig    `yaml:"http"`
 }
 
 type ServerConfig struct {
-	Addr        string        `yaml:"addr"`
-	MaxConns    int           `yaml:"max_conns"`
-	ReadTimeout time.Duration `yaml:"read_timeout"`
+	Addr         string        `yaml:"addr"`
+	MaxConns     int           `yaml:"max_conns"`
+	ReadTimeout  time.Duration `yaml:"read_timeout"`
 	WriteTimeout time.Duration `yaml:"write_timeout"`
 }
 
@@ -32,21 +32,21 @@ type CacheConfig struct {
 }
 
 type ClusterConfig struct {
-	NodeID          string        `yaml:"node_id"`
-	SeedNodes       []string      `yaml:"seed_nodes"`
+	NodeID            string        `yaml:"node_id"`
+	SeedNodes         []string      `yaml:"seed_nodes"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	ElectionTimeout   time.Duration `yaml:"election_timeout"`
-	PhiThreshold    float64       `yaml:"phi_threshold"`
-	SuspectTimeout  time.Duration `yaml:"suspect_timeout"`
-	VirtualNodes    int           `yaml:"virtual_nodes"`
+	PhiThreshold      float64       `yaml:"phi_threshold"`
+	SuspectTimeout    time.Duration `yaml:"suspect_timeout"`
+	VirtualNodes      int           `yaml:"virtual_nodes"`
 }
 
 type WALConfig struct {
-	Enabled   bool          `yaml:"enabled"`
-	Dir       string        `yaml:"dir"`
-	MaxSize   int64         `yaml:"max_size"`
-	SyncMode  string        `yaml:"sync_mode"`
-	EnabledSnapshot bool    `yaml:"enabled_snapshot"`
+	Enabled          bool          `yaml:"enabled"`
+	Dir              string        `yaml:"dir"`
+	MaxSize          int64         `yaml:"max_size"`
+	SyncMode         string        `yaml:"sync_mode"`
+	EnabledSnapshot  bool          `yaml:"enabled_snapshot"`
 	SnapshotInterval time.Duration `yaml:"snapshot_interval"`
 }
 
@@ -82,7 +82,7 @@ func DefaultConfig() *Config {
 			ElectionTimeout:   300 * time.Millisecond,
 			PhiThreshold:      8.0,
 			SuspectTimeout:    5 * time.Second,
-			VirtualNodes:       150,
+			VirtualNodes:      150,
 		},
 		WAL: WALConfig{
 			Enabled:          true,

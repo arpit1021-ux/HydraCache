@@ -83,14 +83,14 @@ func (h *HeartbeatEntry) stats() (time.Duration, float64) {
 }
 
 type Detector struct {
-	mu              sync.RWMutex
-	selfID          string
-	entries         map[string]*HeartbeatEntry
-	phiThreshold    float64
-	suspectTimeout  time.Duration
-	onNodeSuspect   func(nodeID string)
-	onNodeDead      func(nodeID string)
-	stopCh          chan struct{}
+	mu             sync.RWMutex
+	selfID         string
+	entries        map[string]*HeartbeatEntry
+	phiThreshold   float64
+	suspectTimeout time.Duration
+	onNodeSuspect  func(nodeID string)
+	onNodeDead     func(nodeID string)
+	stopCh         chan struct{}
 }
 
 func NewDetector(selfID string) *Detector {

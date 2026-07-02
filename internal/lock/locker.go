@@ -7,8 +7,8 @@ import (
 )
 
 type DistributedLock struct {
-	mu      sync.RWMutex
-	locks   map[string]*LockEntry
+	mu    sync.RWMutex
+	locks map[string]*LockEntry
 }
 
 type LockEntry struct {

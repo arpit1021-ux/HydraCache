@@ -22,11 +22,11 @@ type Cache interface {
 }
 
 type Options struct {
-	EvictionPolicy         EvictionPolicy
-	EvictionCapacity       int
-	ActiveExpiration       bool
-	ExpirationInterval     time.Duration
-	ExpirationSampleSize   int
+	EvictionPolicy       EvictionPolicy
+	EvictionCapacity     int
+	ActiveExpiration     bool
+	ExpirationInterval   time.Duration
+	ExpirationSampleSize int
 }
 
 func DefaultOptions() *Options {
@@ -53,8 +53,8 @@ func New(opts *Options) *LocalCache {
 		opts = DefaultOptions()
 	}
 	c := &LocalCache{
-		store: NewStore(),
-		opts:  opts,
+		store:  NewStore(),
+		opts:   opts,
 		stopCh: make(chan struct{}),
 	}
 	if opts.ActiveExpiration {
@@ -158,10 +158,10 @@ func (c *LocalCache) HitRate() float64 {
 
 func (c *LocalCache) Stats() CacheStats {
 	return CacheStats{
-		Keys:      c.Size(),
-		Hits:      c.keysRead.Load(),
-		Misses:    c.keysMiss.Load(),
-		HitRate:   c.HitRate(),
+		Keys:    c.Size(),
+		Hits:    c.keysRead.Load(),
+		Misses:  c.keysMiss.Load(),
+		HitRate: c.HitRate(),
 	}
 }
 

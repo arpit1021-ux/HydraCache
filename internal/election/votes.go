@@ -10,9 +10,9 @@ type VoteRequest struct {
 }
 
 type VoteResponse struct {
-	VoterID   string
-	Term      uint64
-	Granted   bool
+	VoterID string
+	Term    uint64
+	Granted bool
 }
 
 type HeartbeatRequest struct {
@@ -21,8 +21,8 @@ type HeartbeatRequest struct {
 }
 
 type VoteTracker struct {
-	mu       sync.RWMutex
-	votes    map[string]map[string]VoteResponse
+	mu    sync.RWMutex
+	votes map[string]map[string]VoteResponse
 }
 
 func NewVoteTracker() *VoteTracker {

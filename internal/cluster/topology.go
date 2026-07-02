@@ -179,8 +179,8 @@ func (t *Topology) MarshalJSON() ([]byte, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return json.Marshal(struct {
-		Nodes     []*Node  `json:"nodes"`
-		Epoch     uint64   `json:"epoch"`
+		Nodes     []*Node   `json:"nodes"`
+		Epoch     uint64    `json:"epoch"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}{
 		Nodes:     t.AllNodes(),

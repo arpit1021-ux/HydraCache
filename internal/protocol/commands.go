@@ -6,10 +6,10 @@ import (
 )
 
 type CommandDef struct {
-	Name       string
-	MinArgs    int
-	MaxArgs    int
-	ReadOnly   bool
+	Name     string
+	MinArgs  int
+	MaxArgs  int
+	ReadOnly bool
 }
 
 var Commands = map[string]CommandDef{

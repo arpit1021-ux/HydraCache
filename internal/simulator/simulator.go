@@ -16,10 +16,10 @@ func shortID(id string) string {
 }
 
 type Simulator struct {
-	mu       sync.RWMutex
-	nodes    map[string]*SimNode
+	mu        sync.RWMutex
+	nodes     map[string]*SimNode
 	scenarios []Scenario
-	active   bool
+	active    bool
 }
 
 type SimNode struct {
@@ -47,7 +47,7 @@ const (
 
 func New() *Simulator {
 	return &Simulator{
-		nodes:    make(map[string]*SimNode),
+		nodes:     make(map[string]*SimNode),
 		scenarios: defaultScenarios(),
 	}
 }
