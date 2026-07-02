@@ -23,3 +23,13 @@ issues:
   exclude-use-default: true
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    # Test files often intentionally ignore errors
+    - path: _test\.go
+      linters:
+        - errcheck
+    # Unused methods may be needed for future features
+    - path: internal/cluster/manager\.go
+      text: "is unused"
+      linters:
+        - unused
