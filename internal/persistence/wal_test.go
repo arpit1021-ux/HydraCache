@@ -59,13 +59,13 @@ func TestSnapshotSaveLoad(t *testing.T) {
 		Seq: 42,
 	}
 
-	if err := snap.Save(data); err != nil {
+	if err = snap.Save(data); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 
-	loaded, err := snap.Load()
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
+	loaded, loadErr := snap.Load()
+	if loadErr != nil {
+		t.Fatalf("Load failed: %v", loadErr)
 	}
 	if loaded == nil {
 		t.Fatal("expected non-nil snapshot")

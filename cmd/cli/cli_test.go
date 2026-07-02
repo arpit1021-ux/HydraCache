@@ -7,6 +7,7 @@ import (
 
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/network"
+	"github.com/hydracache/hydracache/internal/protocol"
 )
 
 func startServer(t *testing.T) (string, func()) {
@@ -268,7 +269,8 @@ func TestClientMultipleCommands(t *testing.T) {
 
 	// Multiple SETs
 	for i := 0; i < 100; i++ {
-		resp, err := c.Send("SET", "key", "val")
+		var resp *protocol.Response
+		resp, err = c.Send("SET", "key", "val")
 		if err != nil {
 			t.Fatalf("SET %d failed: %v", i, err)
 		}

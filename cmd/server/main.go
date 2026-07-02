@@ -133,18 +133,18 @@ func main() {
 		mux.HandleFunc("/api/cluster", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			data, _ := topo.MarshalJSON()
-			w.Write(data)
+			_, _ = w.Write(data)
 		})
 		mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			stats := localCache.Stats()
 			data := fmt.Sprintf(`{"keys":%d,"hits":%d,"misses":%d,"hit_rate":%.4f}`,
 				stats.Keys, stats.Hits, stats.Misses, stats.HitRate)
-			w.Write([]byte(data))
+			_, _ = w.Write([]byte(data))
 		})
 		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
+			_, _ = w.Write([]byte("OK"))
 		})
 
 		go func() {
