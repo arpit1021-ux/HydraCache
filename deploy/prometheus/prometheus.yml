@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'hydracache'
+    static_configs:
+      - targets:
+          - 'cache-node-1:8379'
+          - 'cache-node-2:8379'
+          - 'cache-node-3:8379'
+          - 'cache-node-4:8379'
+          - 'cache-node-5:8379'
+    metrics_path: '/metrics'
+    scrape_interval: 5s

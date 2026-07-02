@@ -1,0 +1,134 @@
+services:
+  cache-node-1:
+    build: .
+    container_name: hydracache-node-1
+    ports:
+      - "7379:7379"
+      - "8379:8379"
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-1"]
+    networks:
+      - hydracache
+    volumes:
+      - node1-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8379/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  cache-node-2:
+    build: .
+    container_name: hydracache-node-2
+    ports:
+      - "7380:7379"
+      - "8380:8379"
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-2", "-join", "cache-node-1:7379"]
+    networks:
+      - hydracache
+    volumes:
+      - node2-data:/data
+    depends_on:
+      cache-node-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8379/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  cache-node-3:
+    build: .
+    container_name: hydracache-node-3
+    ports:
+      - "7381:7379"
+      - "8381:8379"
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-3", "-join", "cache-node-1:7379"]
+    networks:
+      - hydracache
+    volumes:
+      - node3-data:/data
+    depends_on:
+      cache-node-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8379/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  cache-node-4:
+    build: .
+    container_name: hydracache-node-4
+    ports:
+      - "7382:7379"
+      - "8382:8379"
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-4", "-join", "cache-node-1:7379"]
+    networks:
+      - hydracache
+    volumes:
+      - node4-data:/data
+    depends_on:
+      cache-node-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8379/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  cache-node-5:
+    build: .
+    container_name: hydracache-node-5
+    ports:
+      - "7383:7379"
+      - "8383:8379"
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-5", "-join", "cache-node-1:7379"]
+    networks:
+      - hydracache
+    volumes:
+      - node5-data:/data
+    depends_on:
+      cache-node-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8379/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: hydracache-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - hydracache
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: hydracache-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - hydracache
+    depends_on:
+      - prometheus
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
+  grafana-data:
+
+networks:
+  hydracache:
+    driver: bridge
