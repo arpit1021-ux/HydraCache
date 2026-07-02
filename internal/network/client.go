@@ -73,7 +73,9 @@ func (c *Client) Send(args ...interface{}) (string, error) {
 		return line[1:], nil
 	case '$':
 		var strLen int
-		fmt.Sscanf(line[1:], "%d", &strLen)
+		if _, err := fmt.Sscanf(line[1:], "%d", &strLen); err != nil {
+			return "", fmt.Errorf("invalid bulk string length: %w", err)
+		}
 		data := make([]byte, strLen+2)
 		_, err := c.reader.Read(data)
 		if err != nil {

@@ -92,7 +92,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	parser := protocol.NewParser(reader)
 	encoder := protocol.NewEncoder(writer)
 
-	conn.SetDeadline(time.Now().Add(30 * time.Minute))
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Minute))
 
 	for {
 		select {
@@ -103,17 +103,17 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		default:
 		}
 
-		conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
 		cmd, err := parser.ReadCommand()
 		if err != nil {
 			if err != io.EOF && err != io.ErrUnexpectedEOF {
-				encoder.WriteError(err.Error())
-				writer.Flush()
+				_ = encoder.WriteError(err.Error())
+				_ = writer.Flush()
 			}
 			return
 		}
 
-		conn.SetDeadline(time.Now().Add(30 * time.Minute))
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Minute))
 		response := s.handler.Handle(cmd)
 		if err := response.WriteTo(encoder); err != nil {
 			return

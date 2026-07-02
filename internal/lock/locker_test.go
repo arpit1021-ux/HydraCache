@@ -35,7 +35,7 @@ func TestDistributedLockAcquireRelease(t *testing.T) {
 func TestDistributedLockExpiry(t *testing.T) {
 	dl := NewDistributedLock()
 
-	dl.Acquire("lock1", "owner1", 50*time.Millisecond)
+	_, _ = dl.Acquire("lock1", "owner1", 50*time.Millisecond)
 	time.Sleep(100 * time.Millisecond)
 
 	if dl.IsLocked("lock1") {
@@ -46,7 +46,7 @@ func TestDistributedLockExpiry(t *testing.T) {
 func TestDistributedLockOwner(t *testing.T) {
 	dl := NewDistributedLock()
 
-	dl.Acquire("lock1", "owner1", 10*time.Second)
+	_, _ = dl.Acquire("lock1", "owner1", 10*time.Second)
 
 	owner, err := dl.GetOwner("lock1")
 	if err != nil {

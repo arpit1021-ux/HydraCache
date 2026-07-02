@@ -208,8 +208,8 @@ func defaultScenarios() []Scenario {
 				s.mu.RUnlock()
 
 				if len(ids) >= 2 {
-					s.AddDelay(ids[0], 5*time.Second)
-					s.AddPacketDrop(ids[1], 0.5)
+					_ = s.AddDelay(ids[0], 5*time.Second)
+					_ = s.AddPacketDrop(ids[1], 0.5)
 				}
 				return nil
 			},
@@ -233,7 +233,7 @@ func defaultScenarios() []Scenario {
 							break
 						}
 						time.Sleep(500 * time.Millisecond)
-						s.KillNode(id)
+						_ = s.KillNode(id)
 					}
 				}()
 				return nil
