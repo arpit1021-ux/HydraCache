@@ -70,7 +70,7 @@ func (w *WAL) recover() {
 		return
 	}
 
-	w.file.Seek(0, io.SeekStart)
+	_, _ = w.file.Seek(0, io.SeekStart)
 	var maxSeq int64
 
 	for {
@@ -83,7 +83,7 @@ func (w *WAL) recover() {
 		}
 	}
 	w.seq = maxSeq
-	w.file.Seek(0, io.SeekEnd)
+	_, _ = w.file.Seek(0, io.SeekEnd)
 }
 
 func (w *WAL) Append(entry WALEntry) error {
@@ -106,10 +106,10 @@ func (w *WAL) Append(entry WALEntry) error {
 
 	switch w.syncMode {
 	case SyncEveryWrite:
-		w.file.Sync()
+		_ = w.file.Sync()
 	case SyncBatch:
 		if atomic.LoadInt64(&w.writeCount)%100 == 0 {
-			w.file.Sync()
+			_ = w.file.Sync()
 		}
 	}
 

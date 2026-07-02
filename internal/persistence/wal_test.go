@@ -13,9 +13,9 @@ func TestWALAppendReplay(t *testing.T) {
 	}
 	defer wal.Close()
 
-	wal.Append(WALEntry{Cmd: "SET", Key: "key1", Value: []byte("val1")})
-	wal.Append(WALEntry{Cmd: "SET", Key: "key2", Value: []byte("val2")})
-	wal.Append(WALEntry{Cmd: "DEL", Key: "key1"})
+	_ = wal.Append(WALEntry{Cmd: "SET", Key: "key1", Value: []byte("val1")})
+	_ = wal.Append(WALEntry{Cmd: "SET", Key: "key2", Value: []byte("val2")})
+	_ = wal.Append(WALEntry{Cmd: "DEL", Key: "key1"})
 
 	entries, err := wal.Replay()
 	if err != nil {
@@ -30,7 +30,7 @@ func TestWALRecovery(t *testing.T) {
 	dir := t.TempDir()
 
 	wal1, _ := NewWAL(dir, 1024*1024, SyncEveryWrite)
-	wal1.Append(WALEntry{Cmd: "SET", Key: "key1", Value: []byte("val1")})
+	_ = wal1.Append(WALEntry{Cmd: "SET", Key: "key1", Value: []byte("val1")})
 	wal1.Close()
 
 	wal2, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
@@ -81,9 +81,9 @@ func TestSnapshotSaveLoad(t *testing.T) {
 func TestRecovererRecover(t *testing.T) {
 	dir := t.TempDir()
 	wal, _ := NewWAL(dir, 1024*1024, SyncEveryWrite)
-	wal.Append(WALEntry{Cmd: "SET", Key: "k1", Value: []byte("v1")})
-	wal.Append(WALEntry{Cmd: "SET", Key: "k2", Value: []byte("v2")})
-	wal.Append(WALEntry{Cmd: "DEL", Key: "k1"})
+	_ = wal.Append(WALEntry{Cmd: "SET", Key: "k1", Value: []byte("v1")})
+	_ = wal.Append(WALEntry{Cmd: "SET", Key: "k2", Value: []byte("v2")})
+	_ = wal.Append(WALEntry{Cmd: "DEL", Key: "k1"})
 	wal.Close()
 
 	wal2, _ := NewWAL(dir, 1024*1024, SyncEveryWrite)

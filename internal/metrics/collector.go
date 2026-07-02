@@ -89,6 +89,6 @@ func (c *Collector) Handler() http.Handler {
 
 		snap := c.Snapshot()
 		data, _ := json.Marshal(snap)
-		w.Write(data)
+		_, _ = w.Write(data)
 	})
 }

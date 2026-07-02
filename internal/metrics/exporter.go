@@ -55,6 +55,6 @@ func (c *Collector) PrometheusHandler() http.Handler {
 			return true
 		})
 
-		w.Write([]byte(sb.String()))
+		_, _ = w.Write([]byte(sb.String()))
 	})
 }
