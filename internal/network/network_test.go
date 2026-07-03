@@ -211,6 +211,9 @@ func TestClient_Delete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET after DEL error: %v", err)
 	}
+	if resp != "" {
+		t.Errorf("GET after DEL should return empty, got %q", resp)
+	}
 }
 
 func TestClient_Exists(t *testing.T) {
