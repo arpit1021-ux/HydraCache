@@ -51,11 +51,13 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
 	}
+	s.wg.Add(1)
 	go s.acceptLoop(ctx)
 	return nil
 }
 
 func (s *Server) acceptLoop(ctx context.Context) {
+	defer s.wg.Done()
 	for {
 		select {
 		case <-s.quit:
