@@ -620,21 +620,135 @@ func TestHandler_SetAndGetDirect(t *testing.T) {
 	}
 }
 
-func TestHandler_SetNXFlag(t *testing.T) {
+func TestHandler_SetNXOnMissingKey(t *testing.T) {
 	c := newTestCache()
 	h := NewHandler(c)
 
-	h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v1", "NX"}})
-	h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v2", "NX"}})
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v1", "NX"}})
+	if resp.err != nil {
+		t.Fatalf("NX on missing key error: %v", resp.err)
+	}
+	if string(resp.data) != "+OK\r\n" {
+		t.Errorf("NX on missing key should return OK, got %q", resp.data)
+	}
+	val, _ := c.Get("k")
+	if string(val) != "v1" {
+		t.Errorf("value = %q, want v1", string(val))
+	}
+}
+
+func TestHandler_SetNXOnExistingKey(t *testing.T) {
+	c := newTestCache()
+	h := NewHandler(c)
+
+	h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v1"}})
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v2", "NX"}})
+	if resp.err != nil {
+		t.Fatalf("unexpected error: %v", resp.err)
+	}
+	if string(resp.data) != "$-1\r\n" {
+		t.Errorf("NX on existing key should return nil, got %q", resp.data)
+	}
+	val, _ := c.Get("k")
+	if string(val) != "v1" {
+		t.Errorf("value should be unchanged, got %q", string(val))
+	}
+}
+
+func TestHandler_SetXXOnExistingKey(t *testing.T) {
+	c := newTestCache()
+	h := NewHandler(c)
+
+	h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v1"}})
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v2", "XX"}})
+	if resp.err != nil {
+		t.Fatalf("XX on existing key error: %v", resp.err)
+	}
+	if string(resp.data) != "+OK\r\n" {
+		t.Errorf("XX on existing key should return OK, got %q", resp.data)
+	}
+	val, _ := c.Get("k")
+	if string(val) != "v2" {
+		t.Errorf("value = %q, want v2", string(val))
+	}
+}
+
+func TestHandler_SetXXOnMissingKey(t *testing.T) {
+	c := newTestCache()
+	h := NewHandler(c)
+
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v2", "XX"}})
+	if resp.err != nil {
+		t.Fatalf("unexpected error: %v", resp.err)
+	}
+	if string(resp.data) != "$-1\r\n" {
+		t.Errorf("XX on missing key should return nil, got %q", resp.data)
+	}
+	_, err := c.Get("k")
+	if err == nil {
+		t.Error("key should not exist after failed XX SET")
+	}
+}
+
+func TestHandler_SetNXWithTTL(t *testing.T) {
+	c := newTestCache()
+	h := NewHandler(c)
+
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v1", "NX", "EX", "10"}})
+	if resp.err != nil {
+		t.Fatalf("NX+EX error: %v", resp.err)
+	}
+	if string(resp.data) != "+OK\r\n" {
+		t.Errorf("NX+EX should return OK, got %q", resp.data)
+	}
+}
+
+func TestHandler_SetNXAndXXTogether(t *testing.T) {
+	c := newTestCache()
+	h := NewHandler(c)
+
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", "v1", "NX", "XX"}})
+	if resp.err != nil {
+		t.Fatalf("unexpected error: %v", resp.err)
+	}
+	if string(resp.data) != "$-1\r\n" {
+		t.Errorf("NX+XX together should return nil, got %q", resp.data)
+	}
+}
+
+func TestConcurrentSetNXOnlyOneWinner(t *testing.T) {
+	c := newTestCache()
+	h := NewHandler(c)
+
+	const goroutines = 100
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			val := fmt.Sprintf("v%d", id)
+			resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"k", val, "NX"}})
+			if string(resp.data) != "$-1\r\n" && string(resp.data) != "+OK\r\n" {
+				t.Errorf("unexpected response: %q", resp.data)
+			}
+		}(i)
+	}
+	wg.Wait()
 
 	val, _ := c.Get("k")
-	// BUG: handler.go:77 ignores parsed flags (NX/XX) — ParseSetFlags returns them
-	// but handleSet discards the third return value. NX should prevent overwrite.
-	if string(val) != "v2" {
-		t.Logf("NX flag IS being enforced (unexpected — known handler bug was fixed?)")
-	} else {
-		t.Logf("CONFIRMED BUG: NX flag ignored — SET always overwrites regardless of NX")
+	if string(val) == "" {
+		t.Fatal("key should have been set by exactly one goroutine")
 	}
+
+	okCount := 0
+	for i := 0; i < goroutines; i++ {
+		h2 := NewHandler(c)
+		resp := h2.Handle(&protocol.Command{Name: "SET", Args: []string{"k2", "onlyonce", "NX"}})
+		if string(resp.data) == "+OK\r\n" {
+			okCount++
+		}
+	}
+	_ = val
 }
 
 func TestServer_LargePayload(t *testing.T) {

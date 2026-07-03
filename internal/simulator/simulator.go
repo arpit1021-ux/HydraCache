@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +20,7 @@ type Simulator struct {
 	mu        sync.RWMutex
 	nodes     map[string]*SimNode
 	scenarios []Scenario
-	active    bool
+	active    atomic.Bool
 }
 
 type SimNode struct {
@@ -146,8 +147,8 @@ func (s *Simulator) RandomFailure() error {
 
 func (s *Simulator) Chaos(duration time.Duration, interval time.Duration) {
 	go func() {
-		s.active = true
-		defer func() { s.active = false }()
+		s.active.Store(true)
+		defer s.active.Store(false)
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -168,9 +169,7 @@ func (s *Simulator) Chaos(duration time.Duration, interval time.Duration) {
 }
 
 func (s *Simulator) IsActive() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.active
+	return s.active.Load()
 }
 
 func (s *Simulator) NodeStatus() map[string]bool {

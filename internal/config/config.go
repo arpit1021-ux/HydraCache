@@ -1,9 +1,14 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -127,6 +132,16 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func parseYAML(data []byte, cfg *Config) error {
-	_ = data
+	if len(data) == 0 {
+		return nil
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(false)
+	if err := dec.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return fmt.Errorf("yaml decode: %w", err)
+	}
 	return nil
 }

@@ -9,6 +9,8 @@ import (
 
 type Cache interface {
 	Set(key string, value []byte, ttl time.Duration) error
+	SetNX(key string, value []byte, ttl time.Duration) bool
+	SetXX(key string, value []byte, ttl time.Duration) bool
 	Get(key string) ([]byte, error)
 	Delete(key string) (bool, error)
 	Exists(key string) (bool, error)
@@ -68,6 +70,16 @@ func (c *LocalCache) Set(key string, value []byte, ttl time.Duration) error {
 	entry := NewEntry(key, value, ttl)
 	c.store.Set(entry)
 	return nil
+}
+
+func (c *LocalCache) SetNX(key string, value []byte, ttl time.Duration) bool {
+	entry := NewEntry(key, value, ttl)
+	return c.store.SetNX(entry)
+}
+
+func (c *LocalCache) SetXX(key string, value []byte, ttl time.Duration) bool {
+	entry := NewEntry(key, value, ttl)
+	return c.store.SetXX(entry)
 }
 
 func (c *LocalCache) Get(key string) ([]byte, error) {

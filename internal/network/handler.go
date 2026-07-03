@@ -74,7 +74,7 @@ func (h *Handler) handlePing(cmd *protocol.Command) *Response {
 }
 
 func (h *Handler) handleSet(cmd *protocol.Command) *Response {
-	value, ttlNano, _, err := protocol.ParseSetFlags(cmd.Args)
+	value, ttlNano, flags, err := protocol.ParseSetFlags(cmd.Args)
 	if err != nil {
 		return &Response{err: err}
 	}
@@ -84,8 +84,35 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 		ttl = time.Duration(ttlNano)
 	}
 
-	if err := h.cache.Set(cmd.Args[0], []byte(value), ttl); err != nil {
-		return &Response{err: err}
+	hasNX := false
+	hasXX := false
+	for _, f := range flags {
+		switch f {
+		case "NX":
+			hasNX = true
+		case "XX":
+			hasXX = true
+		}
+	}
+
+	key := cmd.Args[0]
+	val := []byte(value)
+
+	switch {
+	case hasNX && hasXX:
+		return &Response{data: []byte("$-1\r\n")}
+	case hasNX:
+		if !h.cache.SetNX(key, val, ttl) {
+			return &Response{data: []byte("$-1\r\n")}
+		}
+	case hasXX:
+		if !h.cache.SetXX(key, val, ttl) {
+			return &Response{data: []byte("$-1\r\n")}
+		}
+	default:
+		if err := h.cache.Set(key, val, ttl); err != nil {
+			return &Response{err: err}
+		}
 	}
 	return &Response{data: []byte("+OK\r\n")}
 }

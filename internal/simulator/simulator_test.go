@@ -386,6 +386,27 @@ func TestIsActive_ConcurrentRead(t *testing.T) {
 	wg.Wait()
 }
 
+func TestChaos_ActiveFlag_DataRace(t *testing.T) {
+	s := New()
+	s.RegisterNode("n1", "addr")
+
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		s.Chaos(10*time.Millisecond, 5*time.Millisecond)
+
+		var wg sync.WaitGroup
+		wg.Add(20)
+		for j := 0; j < 20; j++ {
+			go func() {
+				defer wg.Done()
+				_ = s.IsActive()
+			}()
+		}
+		wg.Wait()
+		time.Sleep(15 * time.Millisecond)
+	}
+}
+
 func TestConcurrentRegisterAndKill(t *testing.T) {
 	s := New()
 	const goroutines = 50

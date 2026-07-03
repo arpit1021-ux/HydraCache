@@ -28,6 +28,26 @@ func (s *Store) Set(entry *Entry) {
 	s.entries[entry.Key] = entry
 }
 
+func (s *Store) SetNX(entry *Entry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.entries[entry.Key]; exists {
+		return false
+	}
+	s.entries[entry.Key] = entry
+	return true
+}
+
+func (s *Store) SetXX(entry *Entry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.entries[entry.Key]; !exists {
+		return false
+	}
+	s.entries[entry.Key] = entry
+	return true
+}
+
 func (s *Store) Delete(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
