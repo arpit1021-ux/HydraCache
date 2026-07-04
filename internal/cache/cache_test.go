@@ -15,7 +15,7 @@ func TestNewEntry(t *testing.T) {
 	if string(entry.Value) != "testvalue" {
 		t.Errorf("expected value 'testvalue', got '%s'", string(entry.Value))
 	}
-	if entry.ExpiresAt == 0 {
+	if entry.ExpiresAt.Load() == 0 {
 		t.Error("expected ExpiresAt to be set")
 	}
 }
@@ -244,5 +244,225 @@ func TestLFUEviction(t *testing.T) {
 
 	if _, ok := lfu.Get("c"); ok {
 		t.Error("expected 'c' to be evicted (least frequently used)")
+	}
+}
+
+// --- Fix 1: race test for ExpiresAt atomic access ---
+
+func TestExpirePersistRace(t *testing.T) {
+	c := New(&Options{
+		ActiveExpiration:     false,
+		ExpirationSampleSize: 10,
+	})
+	defer c.Shutdown()
+
+	c.Set("racekey", []byte("val"), 0)
+
+	var wg sync.WaitGroup
+	const goroutines = 50
+	const iterations = 200
+
+	// Writers: alternate between Expire and Persist
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if j%2 == 0 {
+					_ = c.Expire("racekey", 10*time.Second)
+				} else {
+					_ = c.Persist("racekey")
+				}
+			}
+		}(i)
+	}
+
+	// Readers: hammer Get/IsExpired/TTL concurrently
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = c.Get("racekey")
+				_, _ = c.Exists("racekey")
+				_, _ = c.TTL("racekey")
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+// --- Fix 3: Expire on an already-expired key must not resuscitate ---
+
+func TestExpireDoesNotResuscitateExpiredKey(t *testing.T) {
+	c := New(&Options{
+		ActiveExpiration:     false,
+		ExpirationSampleSize: 10,
+	})
+	defer c.Shutdown()
+
+	c.Set("shortlived", []byte("gone"), 1*time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+
+	err := c.Expire("shortlived", 10*time.Second)
+	if err == nil {
+		t.Fatal("Expire on expired key should return an error")
+	}
+
+	exists, _ := c.Exists("shortlived")
+	if exists {
+		t.Fatal("expired key must not be resuscitated by Expire")
+	}
+}
+
+// --- Shutdown correctness: activeExpirationLoop exits after Shutdown ---
+
+func TestActiveExpirationShutdown(t *testing.T) {
+	c := New(&Options{
+		ActiveExpiration:     true,
+		ExpirationInterval:   time.Millisecond,
+		ExpirationSampleSize: 100,
+	})
+
+	// Stuff many short-lived keys in so the sweeper has work to do.
+	for i := 0; i < 500; i++ {
+		c.Set(fmt.Sprintf("k%d", i), []byte("v"), 1*time.Millisecond)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	sizeBefore := c.Size()
+	c.Shutdown()
+
+	// After Shutdown returns the goroutine must have exited.
+	// Verify by checking the size is stable — no more sweeps.
+	time.Sleep(50 * time.Millisecond)
+	if c.Size() != sizeBefore {
+		t.Errorf("cache size changed after Shutdown: before=%d after=%d", sizeBefore, c.Size())
+	}
+}
+
+// --- Active vs lazy agreement ---
+
+func TestActiveVsLazyExpirationAgree(t *testing.T) {
+	// Test lazy path: Get triggers expiration.
+	cLazy := New(&Options{
+		ActiveExpiration:     false,
+		ExpirationSampleSize: 10,
+	})
+	cLazy.Set("lazy", []byte("v"), 1*time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+
+	// Lazy: Get deletes the expired key.
+	_, errGet := cLazy.Get("lazy")
+	lazyExists, _ := cLazy.Exists("lazy")
+	lazyTTL, _ := cLazy.TTL("lazy")
+	lazyKeys, _ := cLazy.Keys()
+	lazySize := cLazy.Size()
+
+	cLazy.Shutdown()
+
+	// Test active path: sweeper deletes the expired key.
+	cActive := New(&Options{
+		ActiveExpiration:     true,
+		ExpirationInterval:   time.Millisecond,
+		ExpirationSampleSize: 100,
+	})
+	cActive.Set("active", []byte("v"), 1*time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // let the sweeper run
+
+	activeExists, _ := cActive.Exists("active")
+	activeTTL, _ := cActive.TTL("active")
+	activeKeys, _ := cActive.Keys()
+	activeSize := cActive.Size()
+	_, errActiveGet := cActive.Get("active")
+
+	cActive.Shutdown()
+
+	// Both paths must produce identical observable state.
+	if (errGet != nil) != (errActiveGet != nil) {
+		t.Errorf("Get error mismatch: lazy=%v active=%v", errGet, errActiveGet)
+	}
+	if lazyExists != activeExists {
+		t.Errorf("Exists mismatch: lazy=%v active=%v", lazyExists, activeExists)
+	}
+	if (lazyTTL < 0) != (activeTTL < 0) {
+		t.Errorf("TTL sign mismatch: lazy=%v active=%v", lazyTTL, activeTTL)
+	}
+	if len(lazyKeys) != len(activeKeys) {
+		t.Errorf("Keys mismatch: lazy=%d active=%d", len(lazyKeys), len(activeKeys))
+	}
+	if lazySize != activeSize {
+		t.Errorf("Size mismatch: lazy=%d active=%d", lazySize, activeSize)
+	}
+}
+
+// --- Edge cases ---
+
+func TestTTLOfZeroMeansNoExpiry(t *testing.T) {
+	c := New(&Options{ActiveExpiration: false})
+	defer c.Shutdown()
+
+	c.Set("permanent", []byte("v"), 0)
+	time.Sleep(5 * time.Millisecond)
+
+	exists, _ := c.Exists("permanent")
+	if !exists {
+		t.Fatal("TTL=0 key must never expire")
+	}
+
+	ttl, _ := c.TTL("permanent")
+	if ttl != -1 {
+		t.Errorf("TTL for no-expiry key should be -1, got %v", ttl)
+	}
+}
+
+func TestExpireNonexistentKey(t *testing.T) {
+	c := New(&Options{ActiveExpiration: false})
+	defer c.Shutdown()
+
+	err := c.Expire("ghost", 10*time.Second)
+	if err == nil {
+		t.Fatal("Expire on nonexistent key must return error")
+	}
+}
+
+func TestPersistOnKeyWithNoTTL(t *testing.T) {
+	c := New(&Options{ActiveExpiration: false})
+	defer c.Shutdown()
+
+	c.Set("nottl", []byte("v"), 0)
+	err := c.Persist("nottl")
+	if err != nil {
+		t.Fatalf("Persist on key with no TTL should not error, got: %v", err)
+	}
+
+	exists, _ := c.Exists("nottl")
+	if !exists {
+		t.Fatal("key must still exist after Persist with no TTL")
+	}
+
+	ttl, _ := c.TTL("nottl")
+	if ttl != -1 {
+		t.Errorf("expected -1 (no expiry) after Persist, got %v", ttl)
+	}
+}
+
+func TestExpireOnAlreadyExpiredKey(t *testing.T) {
+	c := New(&Options{ActiveExpiration: false})
+	defer c.Shutdown()
+
+	c.Set("dying", []byte("v"), 1*time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+
+	err := c.Expire("dying", 10*time.Second)
+	if err == nil {
+		t.Fatal("Expire on expired key should return not-found error")
+	}
+
+	exists, _ := c.Exists("dying")
+	if exists {
+		t.Fatal("expired key should have been cleaned up by Expire")
 	}
 }

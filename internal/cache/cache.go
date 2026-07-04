@@ -66,6 +66,9 @@ func New(opts *Options) *LocalCache {
 	return c
 }
 
+// Set stores a key-value pair. A ttl of 0 means no expiry — the key persists
+// until explicitly deleted. This differs from Expire(k, 0), which sets an
+// immediately-expiring TTL (matching Redis semantics for both cases).
 func (c *LocalCache) Set(key string, value []byte, ttl time.Duration) error {
 	entry := NewEntry(key, value, ttl)
 	c.store.Set(entry)
@@ -126,12 +129,23 @@ func (c *LocalCache) TTL(key string) (time.Duration, error) {
 	return entry.TTL(), nil
 }
 
+// Expire sets a new TTL on an existing key. A ttl of 0 means "expire
+// immediately" (the key will be gone on next access) — this differs from
+// Set(k, v, 0), where 0 means "no expiry."
+//
+// If the key is already expired (but not yet reaped), Expire treats it as
+// non-existent and returns an error rather than resuscitating it. This
+// matches Redis's passive-expiry-then-check behavior.
 func (c *LocalCache) Expire(key string, ttl time.Duration) error {
 	entry, ok := c.store.Get(key)
 	if !ok {
 		return fmt.Errorf("key not found")
 	}
-	entry.ExpiresAt = time.Now().Add(ttl).UnixNano()
+	if entry.IsExpired() {
+		c.store.Delete(key)
+		return fmt.Errorf("key not found")
+	}
+	entry.ExpiresAt.Store(time.Now().Add(ttl).UnixNano())
 	return nil
 }
 
@@ -140,7 +154,7 @@ func (c *LocalCache) Persist(key string) error {
 	if !ok {
 		return fmt.Errorf("key not found")
 	}
-	entry.ExpiresAt = 0
+	entry.ExpiresAt.Store(0)
 	return nil
 }
 
@@ -200,16 +214,20 @@ func (c *LocalCache) activeExpirationLoop() {
 
 func (c *LocalCache) evictExpired() {
 	sampled := 0
+	var expired []string
 	c.store.Range(func(key string, entry *Entry) bool {
 		if sampled >= c.opts.ExpirationSampleSize {
 			return false
 		}
 		sampled++
 		if entry.IsExpired() {
-			c.store.Delete(key)
+			expired = append(expired, key)
 		}
 		return true
 	})
+	for _, key := range expired {
+		c.store.Delete(key)
+	}
 }
 
 func (c *LocalCache) Shutdown() {

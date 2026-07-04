@@ -56,22 +56,30 @@ func ParseSetFlags(args []string) (value string, ttl int64, flags []string, err 
 			if i+1 >= len(args) {
 				return "", 0, nil, fmt.Errorf("missing value for EX")
 			}
-			sec, parseErr := fmt.Sscanf(args[i+1], "%d", &ttl)
-			if sec != 1 || parseErr != nil {
+			var sec int64
+			_, parseErr := fmt.Sscanf(args[i+1], "%d", &sec)
+			if parseErr != nil {
 				return "", 0, nil, fmt.Errorf("invalid EX value")
 			}
-			ttl *= int64(1e9)
+			if sec <= 0 {
+				return "", 0, nil, fmt.Errorf("invalid expire time in 'set' command")
+			}
+			ttl = sec * int64(1e9)
 			flags = append(flags, "EX")
 			i += 2
 		case "PX":
 			if i+1 >= len(args) {
 				return "", 0, nil, fmt.Errorf("missing value for PX")
 			}
-			sec, parseErr := fmt.Sscanf(args[i+1], "%d", &ttl)
-			if sec != 1 || parseErr != nil {
+			var ms int64
+			_, parseErr := fmt.Sscanf(args[i+1], "%d", &ms)
+			if parseErr != nil {
 				return "", 0, nil, fmt.Errorf("invalid PX value")
 			}
-			ttl *= int64(1e6)
+			if ms <= 0 {
+				return "", 0, nil, fmt.Errorf("invalid expire time in 'set' command")
+			}
+			ttl = ms * int64(1e6)
 			flags = append(flags, "PX")
 			i += 2
 		case "NX":

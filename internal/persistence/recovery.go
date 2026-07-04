@@ -34,11 +34,23 @@ func (r *Recoverer) Recover() (*RecoveredState, error) {
 			return nil, err
 		}
 		if snapshot != nil {
+			now := time.Now().UnixNano()
 			for key, entry := range snapshot.Entries {
+				// SnapshotEntry.ExpiresAt is an absolute UnixNano timestamp.
+				// WALEntry.TTL must be a *remaining* relative duration (nanoseconds)
+				// so the field name's contract is honestly satisfied.  Clamp to 0
+				// when the key has already elapsed — the caller should skip it.
+				var remaining int64
+				if entry.ExpiresAt > 0 {
+					remaining = entry.ExpiresAt - now
+					if remaining < 0 {
+						remaining = 0
+					}
+				}
 				state.Entries[key] = WALEntry{
 					Key:       entry.Key,
 					Value:     entry.Value,
-					TTL:       entry.ExpiresAt,
+					TTL:       remaining,
 					Timestamp: entry.CreatedAt,
 				}
 			}

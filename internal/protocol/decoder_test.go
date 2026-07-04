@@ -157,3 +157,53 @@ func TestResponseString(t *testing.T) {
 		})
 	}
 }
+
+// --- Fix 4: negative EX/PX values must be rejected ---
+
+func TestParseSetFlagsNegativeEX(t *testing.T) {
+	_, _, _, err := ParseSetFlags([]string{"key", "val", "EX", "-5"})
+	if err == nil {
+		t.Fatal("negative EX value should return an error")
+	}
+}
+
+func TestParseSetFlagsNegativePX(t *testing.T) {
+	_, _, _, err := ParseSetFlags([]string{"key", "val", "PX", "-1000"})
+	if err == nil {
+		t.Fatal("negative PX value should return an error")
+	}
+}
+
+func TestParseSetFlagsZeroEX(t *testing.T) {
+	_, _, _, err := ParseSetFlags([]string{"key", "val", "EX", "0"})
+	if err == nil {
+		t.Fatal("EX 0 should return an error")
+	}
+}
+
+func TestParseSetFlagsZeroPX(t *testing.T) {
+	_, _, _, err := ParseSetFlags([]string{"key", "val", "PX", "0"})
+	if err == nil {
+		t.Fatal("PX 0 should return an error")
+	}
+}
+
+func TestParseSetFlagsPositiveEX(t *testing.T) {
+	_, ttl, _, err := ParseSetFlags([]string{"key", "val", "EX", "10"})
+	if err != nil {
+		t.Fatalf("valid EX should not error: %v", err)
+	}
+	if ttl != int64(10e9) {
+		t.Errorf("expected 10e9 nanoseconds, got %d", ttl)
+	}
+}
+
+func TestParseSetFlagsPositivePX(t *testing.T) {
+	_, ttl, _, err := ParseSetFlags([]string{"key", "val", "PX", "5000"})
+	if err != nil {
+		t.Fatalf("valid PX should not error: %v", err)
+	}
+	if ttl != int64(5000e6) {
+		t.Errorf("expected 5000e6 nanoseconds, got %d", ttl)
+	}
+}

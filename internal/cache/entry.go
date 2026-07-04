@@ -1,12 +1,15 @@
 package cache
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 type Entry struct {
 	Key         string
 	Value       []byte
 	Flags       int64
-	ExpiresAt   int64
+	ExpiresAt   atomic.Int64
 	CreatedAt   int64
 	AccessCount int64
 	Size        int64
@@ -18,26 +21,29 @@ func NewEntry(key string, value []byte, ttl time.Duration) *Entry {
 	if ttl > 0 {
 		expiresAt = now + int64(ttl)
 	}
-	return &Entry{
+	e := &Entry{
 		Key:       key,
 		Value:     value,
-		ExpiresAt: expiresAt,
 		CreatedAt: now,
 	}
+	e.ExpiresAt.Store(expiresAt)
+	return e
 }
 
 func (e *Entry) IsExpired() bool {
-	if e.ExpiresAt == 0 {
+	expiresAt := e.ExpiresAt.Load()
+	if expiresAt == 0 {
 		return false
 	}
-	return time.Now().UnixNano() >= e.ExpiresAt
+	return time.Now().UnixNano() >= expiresAt
 }
 
 func (e *Entry) TTL() time.Duration {
-	if e.ExpiresAt == 0 {
+	expiresAt := e.ExpiresAt.Load()
+	if expiresAt == 0 {
 		return -1
 	}
-	remaining := e.ExpiresAt - time.Now().UnixNano()
+	remaining := expiresAt - time.Now().UnixNano()
 	if remaining <= 0 {
 		return 0
 	}
