@@ -71,11 +71,40 @@ func (r *Recoverer) Recover() (*RecoveredState, error) {
 				continue
 			}
 
-			if entry.Cmd == "SET" {
+			switch entry.Cmd {
+			case "SET":
 				state.Entries[entry.Key] = entry
 				applied++
-			} else if entry.Cmd == "DEL" {
-				delete(state.Entries, entry.Key)
+			case "DEL":
+				// DEL may carry multiple keys in Args (e.g. DEL k1 k2 k3).
+				// entry.Key is "" for multi-key DELs, so iterate Args.
+				if len(entry.Args) > 0 {
+					for _, k := range entry.Args {
+						delete(state.Entries, k)
+					}
+				} else {
+					delete(state.Entries, entry.Key)
+				}
+				applied++
+			case "EXPIRE":
+				if existing, ok := state.Entries[entry.Key]; ok {
+					existing.TTL = entry.TTL
+					state.Entries[entry.Key] = existing
+					applied++
+				} else {
+					log.Printf("[recovery] EXPIRE on missing key %q at seq %d, skipping", entry.Key, entry.Seq)
+				}
+			case "PERSIST":
+				if _, ok := state.Entries[entry.Key]; ok {
+					existing := state.Entries[entry.Key]
+					existing.TTL = 0
+					state.Entries[entry.Key] = existing
+					applied++
+				} else {
+					log.Printf("[recovery] PERSIST on missing key %q at seq %d, skipping", entry.Key, entry.Seq)
+				}
+			case "FLUSHALL":
+				state.Entries = make(map[string]WALEntry)
 				applied++
 			}
 

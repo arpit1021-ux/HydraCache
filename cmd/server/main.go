@@ -67,6 +67,51 @@ func main() {
 		ExpirationSampleSize: cfg.Cache.ExpirationSampleSize,
 	})
 
+	// --- Persistence setup ---
+	var wal *persistence.WAL
+	var snapshotter *persistence.Snapshotter
+
+	if cfg.WAL.Enabled {
+		var err error
+		syncMode := persistence.SyncModeFromString(cfg.WAL.SyncMode)
+		wal, err = persistence.NewWAL(cfg.WAL.Dir, cfg.WAL.MaxSize, syncMode)
+		if err != nil {
+			log.Printf("[main] warning: WAL init failed: %v", err)
+		}
+	}
+
+	if cfg.WAL.EnabledSnapshot {
+		var err error
+		snapshotter, err = persistence.NewSnapshotter(cfg.WAL.Dir, cfg.WAL.SnapshotInterval, cfg.Cluster.NodeID)
+		if err != nil {
+			log.Printf("[main] warning: snapshot init failed: %v", err)
+		}
+	}
+
+	// --- Startup recovery ---
+	if wal != nil || snapshotter != nil {
+		recoverer := persistence.NewRecoverer(wal, snapshotter)
+		state, err := recoverer.Recover()
+		if err != nil {
+			log.Printf("[main] warning: recovery failed: %v", err)
+		} else if state != nil && len(state.Entries) > 0 {
+			entries := make(map[string]*cache.Entry, len(state.Entries))
+			now := time.Now().UnixNano()
+			for key, we := range state.Entries {
+				// Convert WAL TTL (relative remaining nanoseconds) to
+				// an absolute ExpiresAt. TTL==0 means no expiry.
+				var expiresAt int64
+				if we.TTL > 0 {
+					expiresAt = now + we.TTL
+				}
+				entries[key] = cache.NewEntryWithTTL(we.Key, we.Value, expiresAt, we.Timestamp)
+			}
+			loaded := localCache.BulkLoad(entries)
+			log.Printf("[main] recovered %d entries into cache (WAL seq=%d)", loaded, state.Seq)
+		}
+	}
+
+	// --- Cluster, hash ring, etc. ---
 	topo := cluster.NewTopology()
 	selfNode := cluster.NewNode(cfg.Cluster.NodeID, cfg.Server.Addr)
 	clusterMgr := cluster.NewManager(selfNode, topo)
@@ -94,22 +139,29 @@ func main() {
 	})
 	elect.Start()
 
-	var wal *persistence.WAL
-	var snapshotter *persistence.Snapshotter
-	if cfg.WAL.Enabled {
-		var err error
-		wal, err = persistence.NewWAL(cfg.WAL.Dir, cfg.WAL.MaxSize, persistence.SyncBatch)
-		if err != nil {
-			log.Printf("[main] warning: WAL init failed: %v", err)
-		}
-	}
-
-	if cfg.WAL.EnabledSnapshot {
-		var err error
-		snapshotter, err = persistence.NewSnapshotter(cfg.WAL.Dir, cfg.WAL.SnapshotInterval, cfg.Cluster.NodeID)
-		if err != nil {
-			log.Printf("[main] warning: snapshot init failed: %v", err)
-		}
+	// --- Snapshot timer ---
+	if snapshotter != nil && wal != nil {
+		snapshotter.Start(func() persistence.SnapshotData {
+			// Capture Seq BEFORE the snapshot so that any writes
+			// arriving during or after the snapshot have Seq > captured,
+			// ensuring they replay on recovery rather than being lost.
+			seq := wal.Seq()
+			snap := localCache.Snapshot()
+			entries := make(map[string]persistence.SnapshotEntry, len(snap))
+			for k, v := range snap {
+				entries[k] = persistence.SnapshotEntry{
+					Key:       v.Key,
+					Value:     v.Value,
+					ExpiresAt: v.ExpiresAt,
+					CreatedAt: v.CreatedAt,
+				}
+			}
+			return persistence.SnapshotData{
+				Entries: entries,
+				Seq:     seq,
+			}
+		})
+		log.Printf("[main] snapshot timer started (interval=%v)", cfg.WAL.SnapshotInterval)
 	}
 
 	broker := pubsub.NewBroker()
@@ -117,16 +169,26 @@ func main() {
 
 	collector := metrics.NewCollector()
 
-	tcpServer := network.NewServer(network.ServerConfig{
-		Addr:     cfg.Server.Addr,
-		MaxConns: cfg.Server.MaxConns,
-	}, localCache)
+	// --- TCP server ---
+	var tcpServer *network.Server
+	if wal != nil {
+		tcpServer = network.NewServerWithWAL(network.ServerConfig{
+			Addr:     cfg.Server.Addr,
+			MaxConns: cfg.Server.MaxConns,
+		}, localCache, wal)
+	} else {
+		tcpServer = network.NewServer(network.ServerConfig{
+			Addr:     cfg.Server.Addr,
+			MaxConns: cfg.Server.MaxConns,
+		}, localCache)
+	}
 
 	if err := tcpServer.Start(ctx); err != nil {
 		log.Fatalf("Failed to start TCP server: %v", err)
 	}
 	log.Printf("[main] TCP server listening on %s", cfg.Server.Addr)
 
+	// --- HTTP API ---
 	if cfg.HTTP.Enabled {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", collector.PrometheusHandler())
@@ -159,22 +221,62 @@ func main() {
 		log.Printf("[main] joining cluster via %s", *join)
 	}
 
+	// --- Wait for signal ---
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	<-sigCh
 	log.Println("[hydracache] shutting down...")
 
+	// Shutdown order:
+	// 1. Stop accepting new connections (cancel ctx + close server)
+	// 2. Stop snapshot timer
+	// 3. Final snapshot + truncate WAL
+	// 4. Close WAL (sync + close file)
+	// 5. Stop cluster components
+	// 6. Stop cache background goroutines
 	cancel()
 	detector.Stop()
 	elect.Stop()
 	tcpServer.Shutdown()
-	if wal != nil {
-		wal.Close()
-	}
+
 	if snapshotter != nil {
 		snapshotter.Stop()
 	}
+
+	// Final snapshot and WAL truncation — best-effort: if either fails,
+	// we still proceed with shutdown to avoid blocking indefinitely.
+	// A failed truncate means the next startup replays a few extra
+	// (already-snapshotted) entries, which is idempotent.
+	if snapshotter != nil && wal != nil {
+		seq := wal.Seq()
+		snap := localCache.Snapshot()
+		entries := make(map[string]persistence.SnapshotEntry, len(snap))
+		for k, v := range snap {
+			entries[k] = persistence.SnapshotEntry{
+				Key:       v.Key,
+				Value:     v.Value,
+				ExpiresAt: v.ExpiresAt,
+				CreatedAt: v.CreatedAt,
+			}
+		}
+		sd := persistence.SnapshotData{
+			Entries: entries,
+			Seq:     seq,
+		}
+		if err := snapshotter.Save(sd); err != nil {
+			log.Printf("[main] warning: final snapshot failed: %v", err)
+		} else if err := wal.Truncate(); err != nil {
+			log.Printf("[main] warning: WAL truncate failed: %v", err)
+		}
+	}
+
+	if wal != nil {
+		if err := wal.Close(); err != nil {
+			log.Printf("[main] warning: WAL close failed: %v", err)
+		}
+	}
+
 	clusterMgr.Shutdown()
 	localCache.Shutdown()
 

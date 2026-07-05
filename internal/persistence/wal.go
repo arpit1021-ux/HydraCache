@@ -106,11 +106,20 @@ func (w *WAL) Append(entry WALEntry) error {
 
 	switch w.syncMode {
 	case SyncEveryWrite:
-		_ = w.file.Sync()
+		if err := w.file.Sync(); err != nil {
+			return fmt.Errorf("WAL sync failed: %w", err)
+		}
 	case SyncBatch:
 		if atomic.LoadInt64(&w.writeCount)%100 == 0 {
-			_ = w.file.Sync()
+			if err := w.file.Sync(); err != nil {
+				return fmt.Errorf("WAL sync failed: %w", err)
+			}
 		}
+	case SyncAsync:
+		// Explicit no-op: rely on OS page cache flush. Writes are
+		// durable only after the kernel flushes dirty pages (typically
+		// within 30s). Acceptable for throughput-oriented workloads
+		// where up to 30s of writes may be lost on power failure.
 	}
 
 	return nil
@@ -193,6 +202,22 @@ func (w *WAL) Sync() error {
 
 func (w *WAL) Size() int64 {
 	return atomic.LoadInt64(&w.size)
+}
+
+func (w *WAL) Seq() int64 {
+	return atomic.LoadInt64(&w.seq)
+}
+
+// SyncModeFromString converts a config string to a SyncMode constant.
+func SyncModeFromString(s string) SyncMode {
+	switch s {
+	case "every_write", "everywrite", "sync":
+		return SyncEveryWrite
+	case "async", "none":
+		return SyncAsync
+	default:
+		return SyncBatch
+	}
 }
 
 func (w *WAL) Close() error {

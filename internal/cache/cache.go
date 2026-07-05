@@ -174,6 +174,52 @@ func (c *LocalCache) Ping() string {
 	return "PONG"
 }
 
+// SnapshotItem is a plain-data representation of a cache entry suitable
+// for persistence. It holds the raw field values without the atomic
+// wrappers or mutable state of an in-memory *Entry.
+type SnapshotItem struct {
+	Key       string
+	Value     []byte
+	ExpiresAt int64
+	CreatedAt int64
+}
+
+// Snapshot returns a point-in-time consistent snapshot of all entries.
+// The returned map is safe to iterate after the single RLock held by
+// Store.Snapshot() is released.
+func (c *LocalCache) Snapshot() map[string]SnapshotItem {
+	raw := c.store.Snapshot()
+	snap := make(map[string]SnapshotItem, len(raw))
+	for k, e := range raw {
+		snap[k] = SnapshotItem{
+			Key:       e.Key,
+			Value:     e.Value,
+			ExpiresAt: e.ExpiresAt.Load(),
+			CreatedAt: e.CreatedAt,
+		}
+	}
+	return snap
+}
+
+// BulkLoad inserts entries directly into the store, preserving their
+// original CreatedAt and ExpiresAt timestamps. Used during recovery to
+// restore state without resetting metadata. Entries that are already
+// expired (ExpiresAt > 0 && ExpiresAt < now) are skipped — they would
+// be deleted on first access anyway.
+func (c *LocalCache) BulkLoad(entries map[string]*Entry) int {
+	loaded := 0
+	now := time.Now().UnixNano()
+	for _, e := range entries {
+		expiresAt := e.ExpiresAt.Load()
+		if expiresAt > 0 && expiresAt < now {
+			continue
+		}
+		c.store.Set(e)
+		loaded++
+	}
+	return loaded
+}
+
 func (c *LocalCache) HitRate() float64 {
 	total := c.keysRead.Load() + c.keysMiss.Load()
 	if total == 0 {

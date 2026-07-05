@@ -30,6 +30,19 @@ func NewEntry(key string, value []byte, ttl time.Duration) *Entry {
 	return e
 }
 
+// NewEntryWithTTL creates an entry with an explicit absolute ExpiresAt and
+// CreatedAt. Used during WAL/snapshot recovery where timestamps are known
+// from persisted state rather than the current wall clock.
+func NewEntryWithTTL(key string, value []byte, expiresAt, createdAt int64) *Entry {
+	e := &Entry{
+		Key:       key,
+		Value:     value,
+		CreatedAt: createdAt,
+	}
+	e.ExpiresAt.Store(expiresAt)
+	return e
+}
+
 func (e *Entry) IsExpired() bool {
 	expiresAt := e.ExpiresAt.Load()
 	if expiresAt == 0 {

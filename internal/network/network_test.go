@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
 )
 
@@ -821,5 +822,160 @@ func TestClient_SendRawRESP(t *testing.T) {
 	}
 	if line != "+PONG\r\n" {
 		t.Errorf("raw RESP PING response = %q, want +PONG\\r\\n", line)
+	}
+}
+
+// --- WAL failure tests: prove cache is untouched on append error ---
+
+// newFailingWAL creates a WAL then closes its underlying file so that
+// every subsequent Append() fails with "file already closed."
+func newFailingWAL(t *testing.T) *persistence.WAL {
+	t.Helper()
+	dir := t.TempDir()
+	wal, err := persistence.NewWAL(dir, 1024*1024, persistence.SyncEveryWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal.Close() // closes the file; next Append will fail
+	// Re-open a fresh WAL handle pointing at the now-empty file —
+	// but we need the OLD handle to be the one that fails. Re-open
+	// so we can close it and leave a broken handle.
+	wal2, _ := persistence.NewWAL(dir, 1024*1024, persistence.SyncEveryWrite)
+	wal2.Close()
+	return wal2
+}
+
+func TestWALFailPlainSETLeavesCacheUntouched(t *testing.T) {
+	c := newTestCache()
+	wal := newFailingWAL(t)
+	h := NewHandlerWithWAL(c, wal)
+
+	// Case 1: key does not exist yet — SET must fail and key must stay absent.
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"newkey", "newval"}})
+	if resp.err == nil {
+		t.Fatal("SET against broken WAL should return an error")
+	}
+	if _, err := c.Get("newkey"); err == nil {
+		t.Fatal("cache must not contain 'newkey' after WAL failure on SET")
+	}
+
+	// Case 2: key already exists — SET must fail and value must be unchanged.
+	c.Set("existing", []byte("original"), 0)
+	resp = h.Handle(&protocol.Command{Name: "SET", Args: []string{"existing", "overwritten"}})
+	if resp.err == nil {
+		t.Fatal("SET against broken WAL should return an error")
+	}
+	val, err := c.Get("existing")
+	if err != nil {
+		t.Fatalf("existing key should still be present: %v", err)
+	}
+	if string(val) != "original" {
+		t.Errorf("expected 'original', got %q", string(val))
+	}
+}
+
+func TestWALFailSETNXRollsBack(t *testing.T) {
+	c := newTestCache()
+	wal := newFailingWAL(t)
+	h := NewHandlerWithWAL(c, wal)
+
+	// NX on absent key: SetNX succeeds in cache, WAL fails, rollback
+	// must Delete the key unconditionally. The old code captured prior
+	// state before SetNX and conditionally restored it on failure —
+	// this was wrong because SetNX succeeding means the key was absent
+	// at the CAS moment; any "prior" value captured before SetNX could
+	// be stale (another goroutine may have legitimately deleted it).
+	resp := h.Handle(&protocol.Command{Name: "SET", Args: []string{"nxkey", "val", "NX"}})
+	if resp.err == nil {
+		t.Fatal("SET NX against broken WAL should return an error")
+	}
+	if _, err := c.Get("nxkey"); err == nil {
+		t.Fatal("SET NX rollback failed: key should have been removed")
+	}
+
+	// NX on existing key: SetNX is not called (returns nil immediately),
+	// so no WAL append is attempted and the value stays unchanged.
+	c.Set("occupied", []byte("keeper"), 0)
+	resp = h.Handle(&protocol.Command{Name: "SET", Args: []string{"occupied", "intruder", "NX"}})
+	if resp.err != nil {
+		t.Fatalf("SET NX on existing key should not hit WAL at all: %v", resp.err)
+	}
+	val, err := c.Get("occupied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(val) != "keeper" {
+		t.Errorf("expected 'keeper', got %q", string(val))
+	}
+
+	// Prove the old prior-capture bug is gone: set a key, delete it,
+	// then NX the same key. SetNX succeeds (key absent), WAL fails.
+	// The rollback must NOT resurrect the old value.
+	c.Set("ephemeral", []byte("doomed"), 0)
+	c.Delete("ephemeral")
+	resp = h.Handle(&protocol.Command{Name: "SET", Args: []string{"ephemeral", "new", "NX"}})
+	if resp.err == nil {
+		t.Fatal("expected WAL error")
+	}
+	if _, err := c.Get("ephemeral"); err == nil {
+		t.Fatal("rollback must not resurrect a deleted key")
+	}
+}
+
+func TestWALFailDELLeavesCacheUntouched(t *testing.T) {
+	c := newTestCache()
+	wal := newFailingWAL(t)
+	h := NewHandlerWithWAL(c, wal)
+
+	c.Set("d1", []byte("v1"), 0)
+	c.Set("d2", []byte("v2"), 0)
+
+	resp := h.Handle(&protocol.Command{Name: "DEL", Args: []string{"d1", "d2"}})
+	if resp.err == nil {
+		t.Fatal("DEL against broken WAL should return an error")
+	}
+	// Both keys must still exist — WAL failure prevents deletion.
+	if _, err := c.Get("d1"); err != nil {
+		t.Fatal("d1 should still exist after WAL failure on DEL")
+	}
+	if _, err := c.Get("d2"); err != nil {
+		t.Fatal("d2 should still exist after WAL failure on DEL")
+	}
+}
+
+func TestWALFailEXPIRELeavesCacheUntouched(t *testing.T) {
+	c := newTestCache()
+	wal := newFailingWAL(t)
+	h := NewHandlerWithWAL(c, wal)
+
+	c.Set("ekey", []byte("v"), 0) // no TTL
+	resp := h.Handle(&protocol.Command{Name: "EXPIRE", Args: []string{"ekey", "60"}})
+	if resp.err == nil {
+		t.Fatal("EXPIRE against broken WAL should return an error")
+	}
+	// Key must still have no TTL — EXPIRE was not applied.
+	ttl, err := c.TTL("ekey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl != -1 {
+		t.Errorf("expected -1 (no TTL), got %v", ttl)
+	}
+}
+
+func TestWALFailFLUSHALLLeavesCacheUntouched(t *testing.T) {
+	c := newTestCache()
+	wal := newFailingWAL(t)
+	h := NewHandlerWithWAL(c, wal)
+
+	c.Set("a", []byte("1"), 0)
+	c.Set("b", []byte("2"), 0)
+
+	resp := h.Handle(&protocol.Command{Name: "FLUSHALL", Args: []string{}})
+	if resp.err == nil {
+		t.Fatal("FLUSHALL against broken WAL should return an error")
+	}
+	if c.Size() != 2 {
+		t.Errorf("expected 2 keys after failed FLUSHALL, got %d", c.Size())
 	}
 }

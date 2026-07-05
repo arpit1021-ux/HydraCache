@@ -466,3 +466,119 @@ func TestExpireOnAlreadyExpiredKey(t *testing.T) {
 		t.Fatal("expired key should have been cleaned up by Expire")
 	}
 }
+
+// --- Store.Snapshot() race test ---
+
+func TestStoreSnapshotRace(t *testing.T) {
+	s := NewStore()
+	const goroutines = 50
+	const iterations = 200
+
+	var wg sync.WaitGroup
+
+	// Writers: hammer Set and Delete concurrently.
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				key := fmt.Sprintf("k%d", j%20)
+				e := NewEntry(key, []byte(fmt.Sprintf("v%d_%d", n, j)), 0)
+				if j%3 == 0 {
+					s.Delete(key)
+				} else {
+					s.Set(e)
+				}
+			}
+		}(i)
+	}
+
+	// Readers: call Snapshot() concurrently.
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				snap := s.Snapshot()
+				// Verify the snapshot is internally consistent: no key
+				// should have a nil value.
+				for k, v := range snap {
+					if v == nil {
+						t.Errorf("Snapshot returned nil value for key %q", k)
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// --- LocalCache.Snapshot() test ---
+
+func TestLocalCacheSnapshot(t *testing.T) {
+	c := New(&Options{ActiveExpiration: false})
+	defer c.Shutdown()
+
+	c.Set("a", []byte("1"), 0)
+	c.Set("b", []byte("2"), 5*time.Second)
+	c.Set("c", []byte("3"), 0)
+
+	snap := c.Snapshot()
+	if len(snap) != 3 {
+		t.Fatalf("expected 3 entries in snapshot, got %d", len(snap))
+	}
+
+	// "a" has no TTL — ExpiresAt should be 0
+	if e, ok := snap["a"]; !ok {
+		t.Fatal("key 'a' missing")
+	} else if e.ExpiresAt != 0 {
+		t.Errorf("key 'a' ExpiresAt should be 0, got %d", e.ExpiresAt)
+	}
+
+	// "b" has TTL — ExpiresAt should be a future timestamp
+	if e, ok := snap["b"]; !ok {
+		t.Fatal("key 'b' missing")
+	} else if e.ExpiresAt <= time.Now().UnixNano() {
+		t.Errorf("key 'b' ExpiresAt should be in the future, got %d", e.ExpiresAt)
+	}
+
+	// Values should match
+	if string(snap["a"].Value) != "1" {
+		t.Errorf("expected value '1', got %q", snap["a"].Value)
+	}
+}
+
+// --- BulkLoad test ---
+
+func TestBulkLoad(t *testing.T) {
+	c := New(&Options{ActiveExpiration: false})
+	defer c.Shutdown()
+
+	now := time.Now().UnixNano()
+	entries := map[string]*Entry{
+		"live":  NewEntryWithTTL("live", []byte("yes"), now+int64(time.Hour), now),
+		"stale": NewEntryWithTTL("stale", []byte("no"), now-int64(time.Minute), now),
+		"perm":  NewEntryWithTTL("perm", []byte("forever"), 0, now),
+	}
+
+	loaded := c.BulkLoad(entries)
+	if loaded != 2 {
+		t.Errorf("expected 2 loaded (stale should be skipped), got %d", loaded)
+	}
+
+	val, err := c.Get("live")
+	if err != nil || string(val) != "yes" {
+		t.Errorf("live key: val=%q err=%v", val, err)
+	}
+
+	val, err = c.Get("perm")
+	if err != nil || string(val) != "forever" {
+		t.Errorf("perm key: val=%q err=%v", val, err)
+	}
+
+	_, err = c.Get("stale")
+	if err == nil {
+		t.Error("stale key should have been skipped by BulkLoad")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
 )
 
@@ -42,6 +43,20 @@ func NewServer(cfg ServerConfig, c cache.Cache) *Server {
 		sem:      make(chan struct{}, cfg.MaxConns),
 		quit:     make(chan struct{}),
 		handler:  NewHandler(c),
+	}
+}
+
+func NewServerWithWAL(cfg ServerConfig, c cache.Cache, wal *persistence.WAL) *Server {
+	if cfg.MaxConns <= 0 {
+		cfg.MaxConns = 10000
+	}
+	return &Server{
+		addr:     cfg.Addr,
+		cache:    c,
+		maxConns: cfg.MaxConns,
+		sem:      make(chan struct{}, cfg.MaxConns),
+		quit:     make(chan struct{}),
+		handler:  NewHandlerWithWAL(c, wal),
 	}
 }
 

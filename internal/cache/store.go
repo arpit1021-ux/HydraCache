@@ -94,3 +94,17 @@ func (s *Store) Range(fn func(key string, entry *Entry) bool) {
 		}
 	}
 }
+
+// Snapshot returns a shallow copy of the entries map under a single RLock.
+// The map itself is new, but *Entry pointers are shared with the store.
+// This is safe because Entry's only post-creation mutable field
+// (ExpiresAt) is an atomic.Int64 — reads and writes to it cannot tear.
+func (s *Store) Snapshot() map[string]*Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snap := make(map[string]*Entry, len(s.entries))
+	for k, v := range s.entries {
+		snap[k] = v
+	}
+	return snap
+}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
 )
 
@@ -23,10 +24,15 @@ func (r *Response) WriteTo(encoder *protocol.Encoder) error {
 
 type Handler struct {
 	cache cache.Cache
+	wal   *persistence.WAL
 }
 
 func NewHandler(c cache.Cache) *Handler {
 	return &Handler{cache: c}
+}
+
+func NewHandlerWithWAL(c cache.Cache, wal *persistence.WAL) *Handler {
+	return &Handler{cache: c, wal: wal}
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {
@@ -98,21 +104,53 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 	key := cmd.Args[0]
 	val := []byte(value)
 
-	switch {
-	case hasNX && hasXX:
+	// --- Conditional SET (NX/XX): mutate first, WAL after, rollback on failure ---
+	if hasNX && hasXX {
 		return &Response{data: []byte("$-1\r\n")}
-	case hasNX:
+	}
+
+	if hasNX {
+		// SetNX is atomic: if it succeeds, the key was absent at the moment
+		// of the write. No prior state to capture — rollback on WAL failure
+		// is always a plain Delete.
 		if !h.cache.SetNX(key, val, ttl) {
 			return &Response{data: []byte("$-1\r\n")}
 		}
-	case hasXX:
+		if err := h.walAppend("SET", cmd.Args, key, val, ttlNano); err != nil {
+			_, _ = h.cache.Delete(key)
+			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+		}
+		return &Response{data: []byte("+OK\r\n")}
+	}
+
+	if hasXX {
+		// XX path: rollback restores prior state because the key existed
+		// before we overwrote it. Known limitation: a concurrent write
+		// between our Get() and SetXX() could land between the mutation
+		// and the rollback, and the rollback would clobber it. Full
+		// correctness requires CAS-with-version, out of scope here.
+		prior, priorErr := h.cache.Get(key)
+		priorExists := priorErr == nil
 		if !h.cache.SetXX(key, val, ttl) {
 			return &Response{data: []byte("$-1\r\n")}
 		}
-	default:
-		if err := h.cache.Set(key, val, ttl); err != nil {
-			return &Response{err: err}
+		if err := h.walAppend("SET", cmd.Args, key, val, ttlNano); err != nil {
+			if priorExists {
+				_ = h.cache.Set(key, prior, 0)
+			} else {
+				_, _ = h.cache.Delete(key)
+			}
+			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 		}
+		return &Response{data: []byte("+OK\r\n")}
+	}
+
+	// --- Unconditional SET: WAL first, then mutate. Cache untouched if WAL fails. ---
+	if err := h.walAppend("SET", cmd.Args, key, val, ttlNano); err != nil {
+		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+	}
+	if err := h.cache.Set(key, val, ttl); err != nil {
+		return &Response{err: err}
 	}
 	return &Response{data: []byte("+OK\r\n")}
 }
@@ -126,6 +164,11 @@ func (h *Handler) handleGet(cmd *protocol.Command) *Response {
 }
 
 func (h *Handler) handleDel(cmd *protocol.Command) *Response {
+	// WAL first for the unconditional DEL command. If WAL fails, the
+	// keys remain in the cache — no mutation has occurred yet.
+	if err := h.walAppend("DEL", cmd.Args, "", nil, 0); err != nil {
+		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+	}
 	count := 0
 	for _, key := range cmd.Args {
 		deleted, _ := h.cache.Delete(key)
@@ -175,6 +218,10 @@ func (h *Handler) handleExpire(cmd *protocol.Command) *Response {
 	if err != nil {
 		return &Response{err: fmt.Errorf("invalid expire value")}
 	}
+	// WAL first. Cache is untouched if WAL write fails.
+	if err := h.walAppend("EXPIRE", cmd.Args, cmd.Args[0], nil, int64(seconds)*int64(time.Second)); err != nil {
+		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+	}
 	if err := h.cache.Expire(cmd.Args[0], time.Duration(seconds)*time.Second); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
@@ -182,6 +229,10 @@ func (h *Handler) handleExpire(cmd *protocol.Command) *Response {
 }
 
 func (h *Handler) handlePersist(cmd *protocol.Command) *Response {
+	// WAL first. Cache is untouched if WAL write fails.
+	if err := h.walAppend("PERSIST", cmd.Args, cmd.Args[0], nil, 0); err != nil {
+		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+	}
 	if err := h.cache.Persist(cmd.Args[0]); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
@@ -209,6 +260,10 @@ func (h *Handler) handleDBSize(cmd *protocol.Command) *Response {
 }
 
 func (h *Handler) handleFlushAll(cmd *protocol.Command) *Response {
+	// WAL first. Cache is untouched if WAL write fails.
+	if err := h.walAppend("FLUSHALL", nil, "", nil, 0); err != nil {
+		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+	}
 	h.cache.Flush()
 	return &Response{data: []byte("+OK\r\n")}
 }
@@ -220,4 +275,19 @@ func (h *Handler) handleInfo(cmd *protocol.Command) *Response {
 		stats.Keys, stats.Hits, stats.Misses, stats.HitRate,
 	)
 	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(info), info)}
+}
+
+// walAppend writes a WAL entry if a WAL is configured. Returns an error
+// if the WAL is enabled but the append or sync failed.
+func (h *Handler) walAppend(cmd string, args []string, key string, value []byte, ttl int64) error {
+	if h.wal == nil {
+		return nil
+	}
+	return h.wal.Append(persistence.WALEntry{
+		Cmd:   cmd,
+		Args:  args,
+		Key:   key,
+		Value: value,
+		TTL:   ttl,
+	})
 }
