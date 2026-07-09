@@ -27,6 +27,7 @@ var Commands = map[string]CommandDef{
 	"FLUSHALL": {Name: "FLUSHALL", MinArgs: 0, MaxArgs: 0, ReadOnly: false},
 	"INFO":     {Name: "INFO", MinArgs: 0, MaxArgs: 1, ReadOnly: true},
 	"CLUSTER":  {Name: "CLUSTER", MinArgs: 1, MaxArgs: -1, ReadOnly: true},
+	"GOSSIP":   {Name: "GOSSIP", MinArgs: 1, MaxArgs: 1, ReadOnly: false},
 }
 
 func ValidateCommand(cmd *Command) error {

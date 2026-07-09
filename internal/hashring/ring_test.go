@@ -2,7 +2,9 @@ package hashring
 
 import (
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestHashRingAddNode(t *testing.T) {
@@ -134,5 +136,54 @@ func TestHashRingConsistency(t *testing.T) {
 
 	if moved > 50 {
 		t.Errorf("too many keys moved on node addition: %d/100", moved)
+	}
+}
+
+func TestRebalanceStatus_Complete_Race(t *testing.T) {
+	ring := New(150)
+	rebalancer := NewRebalancer(ring, nil)
+
+	keys := make([]string, 100)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("key:%d", i)
+	}
+
+	status := rebalancer.StartRebalance("src", "dst", keys)
+
+	// Readers: check IsComplete and MigratedKeys concurrently via the live pointer.
+	var wg sync.WaitGroup
+	const readers = 20
+	wg.Add(readers)
+	for i := 0; i < readers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = status.IsComplete()
+				_ = status.GetMigratedKeys()
+			}
+		}()
+	}
+
+	// Wait for rebalance to finish.
+	deadline := time.After(10 * time.Second)
+	for {
+		if status.IsComplete() {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("rebalance did not complete in time")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	wg.Wait()
+
+	if !status.IsComplete() {
+		t.Error("rebalance should be complete")
+	}
+	if status.GetMigratedKeys() != int64(len(keys)) {
+		t.Errorf("MigratedKeys = %d, want %d", status.GetMigratedKeys(), len(keys))
 	}
 }

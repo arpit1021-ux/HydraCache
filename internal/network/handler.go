@@ -23,8 +23,14 @@ func (r *Response) WriteTo(encoder *protocol.Encoder) error {
 }
 
 type Handler struct {
-	cache cache.Cache
-	wal   *persistence.WAL
+	cache  cache.Cache
+	wal    *persistence.WAL
+	gossip GossipHandler
+}
+
+// GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
+type GossipHandler interface {
+	HandleGossip(payload string) (string, error)
 }
 
 func NewHandler(c cache.Cache) *Handler {
@@ -33,6 +39,12 @@ func NewHandler(c cache.Cache) *Handler {
 
 func NewHandlerWithWAL(c cache.Cache, wal *persistence.WAL) *Handler {
 	return &Handler{cache: c, wal: wal}
+}
+
+// SetGossip wires the gossip handler into the command dispatch.
+// Must be called before the server starts accepting connections.
+func (h *Handler) SetGossip(g GossipHandler) {
+	h.gossip = g
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {
@@ -67,6 +79,8 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 		return h.handleFlushAll(cmd)
 	case "INFO":
 		return h.handleInfo(cmd)
+	case "GOSSIP":
+		return h.handleGossip(cmd)
 	default:
 		return &Response{err: fmt.Errorf("unknown command '%s'", cmd.Name)}
 	}
@@ -290,4 +304,15 @@ func (h *Handler) walAppend(cmd string, args []string, key string, value []byte,
 		Value: value,
 		TTL:   ttl,
 	})
+}
+
+func (h *Handler) handleGossip(cmd *protocol.Command) *Response {
+	if h.gossip == nil {
+		return &Response{err: fmt.Errorf("gossip not configured")}
+	}
+	resp, err := h.gossip.HandleGossip(cmd.Args[0])
+	if err != nil {
+		return &Response{err: err}
+	}
+	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(resp), resp)}
 }

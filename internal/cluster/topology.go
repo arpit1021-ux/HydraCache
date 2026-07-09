@@ -89,7 +89,7 @@ func (t *Topology) DeadNodes() []*Node {
 	defer t.mu.RUnlock()
 	var nodes []*Node
 	for _, n := range t.nodes {
-		if n.Health == HealthDead {
+		if n.GetHealth() == HealthDead {
 			nodes = append(nodes, n)
 		}
 	}
@@ -147,7 +147,7 @@ func (t *Topology) SetNodeHealth(nodeID string, health Health) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if node, ok := t.nodes[nodeID]; ok {
-		node.Health = health
+		node.SetHealth(health)
 		node.LastSeen = time.Now()
 		t.epoch++
 		t.notify(TopologyEvent{Type: "health_changed", NodeID: nodeID, Epoch: t.epoch, Timestamp: time.Now()})
@@ -158,7 +158,7 @@ func (t *Topology) SetNodeRole(nodeID string, role Role) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if node, ok := t.nodes[nodeID]; ok {
-		node.Role = role
+		node.SetRole(role)
 		t.epoch++
 	}
 }
@@ -178,12 +178,16 @@ func (t *Topology) notify(event TopologyEvent) {
 func (t *Topology) MarshalJSON() ([]byte, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	nodes := make([]*Node, 0, len(t.nodes))
+	for _, n := range t.nodes {
+		nodes = append(nodes, n)
+	}
 	return json.Marshal(struct {
 		Nodes     []*Node   `json:"nodes"`
 		Epoch     uint64    `json:"epoch"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}{
-		Nodes:     t.AllNodes(),
+		Nodes:     nodes,
 		Epoch:     t.epoch,
 		UpdatedAt: t.updatedAt,
 	})

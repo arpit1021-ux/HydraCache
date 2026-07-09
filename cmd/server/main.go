@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/hydracache/hydracache/internal/config"
 	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
-	"github.com/hydracache/hydracache/internal/heartbeat"
 	"github.com/hydracache/hydracache/internal/logging"
 	"github.com/hydracache/hydracache/internal/metrics"
 	"github.com/hydracache/hydracache/internal/network"
@@ -114,27 +114,22 @@ func main() {
 	// --- Cluster, hash ring, etc. ---
 	topo := cluster.NewTopology()
 	selfNode := cluster.NewNode(cfg.Cluster.NodeID, cfg.Server.Addr)
-	clusterMgr := cluster.NewManager(selfNode, topo)
-	if err := clusterMgr.Start(ctx); err != nil {
-		log.Fatalf("Failed to start cluster manager: %v", err)
-	}
 
 	hashRing := hashring.New(cfg.Cluster.VirtualNodes)
 	hashRing.AddNode(cfg.Cluster.NodeID)
 
+	clusterMgr := cluster.NewManager(selfNode, topo, hashRing)
+	if err := clusterMgr.Start(ctx); err != nil {
+		log.Fatalf("Failed to start cluster manager: %v", err)
+	}
+
 	locator := hashring.NewLocator(hashRing, cfg.Cache.ReplicationFactor)
 	_ = locator
-
-	detector := heartbeat.NewDetector(cfg.Cluster.NodeID)
-	detector.StartChecking(cfg.Cluster.HeartbeatInterval)
-
-	membership := heartbeat.NewMembership()
-	membership.AddMember(cfg.Cluster.NodeID, cfg.Server.Addr)
 
 	elect := election.New(cfg.Cluster.NodeID, 1)
 	elect.OnBecomeLeader(func() {
 		log.Printf("[main] this node is now the leader")
-		selfNode.Role = cluster.RoleLeader
+		selfNode.SetRole(cluster.RoleLeader)
 		topo.SetNodeRole(cfg.Cluster.NodeID, cluster.RoleLeader)
 	})
 	elect.Start()
@@ -183,10 +178,20 @@ func main() {
 		}, localCache)
 	}
 
+	tcpServer.SetGossip(clusterMgr.Gossip())
+
 	if err := tcpServer.Start(ctx); err != nil {
 		log.Fatalf("Failed to start TCP server: %v", err)
 	}
 	log.Printf("[main] TCP server listening on %s", cfg.Server.Addr)
+
+	// --- Bootstrap from seeds ---
+	if *join != "" {
+		seeds := strings.Split(*join, ",")
+		if err := clusterMgr.Bootstrap(seeds); err != nil {
+			log.Printf("[main] bootstrap error: %v", err)
+		}
+	}
 
 	// --- HTTP API ---
 	if cfg.HTTP.Enabled {
@@ -217,10 +222,6 @@ func main() {
 		}()
 	}
 
-	if *join != "" {
-		log.Printf("[main] joining cluster via %s", *join)
-	}
-
 	// --- Wait for signal ---
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -236,7 +237,6 @@ func main() {
 	// 5. Stop cluster components
 	// 6. Stop cache background goroutines
 	cancel()
-	detector.Stop()
 	elect.Stop()
 	tcpServer.Shutdown()
 

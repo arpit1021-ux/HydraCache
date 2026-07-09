@@ -159,3 +159,9 @@ func (s *Server) Addr() net.Addr {
 func (s *Server) ConnectionCount() int64 {
 	return s.connCount.Load()
 }
+
+// SetGossip wires gossip into the command handler. Must be called
+// before the server starts accepting connections.
+func (s *Server) SetGossip(g GossipHandler) {
+	s.handler.SetGossip(g)
+}

@@ -10,9 +10,18 @@ type RebalanceStatus struct {
 	SourceNode   string `json:"source_node"`
 	TargetNode   string `json:"target_node"`
 	TotalKeys    int    `json:"total_keys"`
-	MigratedKeys int64  `json:"migrated_keys"`
-	Complete     bool   `json:"complete"`
+	migratedKeys int64
+	complete     atomic.Bool
+	done         chan struct{}
 }
+
+func (s *RebalanceStatus) IsComplete() bool       { return s.complete.Load() }
+func (s *RebalanceStatus) MarkComplete()          { s.complete.Store(true) }
+func (s *RebalanceStatus) GetMigratedKeys() int64 { return atomic.LoadInt64(&s.migratedKeys) }
+
+// Done returns a channel that is closed when the rebalance finishes
+// (successfully or not). Safe to select on from any goroutine.
+func (s *RebalanceStatus) Done() <-chan struct{} { return s.done }
 
 type Rebalancer struct {
 	ring   *HashRing
@@ -35,6 +44,7 @@ func (r *Rebalancer) StartRebalance(sourceNode, targetNode string, keys []string
 		SourceNode: sourceNode,
 		TargetNode: targetNode,
 		TotalKeys:  len(keys),
+		done:       make(chan struct{}),
 	}
 	r.status[sourceNode+":"+targetNode] = status
 	r.mu.Unlock()
@@ -44,6 +54,8 @@ func (r *Rebalancer) StartRebalance(sourceNode, targetNode string, keys []string
 }
 
 func (r *Rebalancer) executeRebalance(status *RebalanceStatus, keys []string) {
+	defer close(status.done)
+
 	for _, key := range keys {
 		if r.onKey != nil {
 			if err := r.onKey(key, status.TargetNode); err != nil {
@@ -51,9 +63,9 @@ func (r *Rebalancer) executeRebalance(status *RebalanceStatus, keys []string) {
 				continue
 			}
 		}
-		atomic.AddInt64(&status.MigratedKeys, 1)
+		atomic.AddInt64(&status.migratedKeys, 1)
 	}
-	status.Complete = true
+	status.MarkComplete()
 	sID := status.SourceNode
 	if len(sID) > 8 {
 		sID = sID[:8]
