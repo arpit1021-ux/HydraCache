@@ -238,7 +238,7 @@ func (g *Gossip) applyToTopology(m GossipMember) {
 			// New node — add to topology
 			n := NewNode(m.ID, m.Address)
 			n.SetRole(m.Role)
-			g.topology.AddNode(n)
+			_ = g.topology.AddNode(n) // node may race with another gossip round
 			log.Printf("[gossip] discovered new node %s at %s", shortID(m.ID), m.Address)
 		} else {
 			// Existing node — ensure alive

@@ -96,7 +96,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.topology.SetNodeHealth(nodeID, HealthSuspect)
 	})
 	m.detector.OnNodeDead(func(nodeID string) {
-		m.RemoveNode(nodeID)
+		_ = m.RemoveNode(nodeID)
 	})
 
 	// Start failure detection and heartbeat transport
@@ -198,7 +198,7 @@ func (m *Manager) removeDeadNode(nodeID string) error {
 	defer m.rebalMu.Unlock()
 
 	m.ring.RemoveNode(nodeID)
-	m.topology.RemoveNode(nodeID)
+	_ = m.topology.RemoveNode(nodeID)
 	log.Printf("[cluster] dead node %s removed from ring and topology", shortID(nodeID))
 	return nil
 }
@@ -215,14 +215,14 @@ func (m *Manager) removeGraceful(nodeID string) error {
 	m.rebalMu.Unlock()
 
 	if len(affectedKeys) == 0 {
-		m.topology.RemoveNode(nodeID)
+		_ = m.topology.RemoveNode(nodeID)
 		return nil
 	}
 
 	newOwner := m.ring.GetNode(affectedKeys[0])
 	if newOwner == "" || newOwner == nodeID {
 		log.Printf("[cluster] no new owner found for rebalanced keys from %s", shortID(nodeID))
-		m.topology.RemoveNode(nodeID)
+		_ = m.topology.RemoveNode(nodeID)
 		return nil
 	}
 
@@ -237,7 +237,7 @@ func (m *Manager) removeGraceful(nodeID string) error {
 			shortID(nodeID), status.GetMigratedKeys(), status.TotalKeys)
 	}
 
-	m.topology.RemoveNode(nodeID)
+	_ = m.topology.RemoveNode(nodeID)
 	return nil
 }
 
