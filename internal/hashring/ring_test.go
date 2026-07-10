@@ -139,6 +139,172 @@ func TestHashRingConsistency(t *testing.T) {
 	}
 }
 
+func TestHashRingSuccessorAfterRemoval(t *testing.T) {
+	ring := New(150)
+	ring.AddNode("node-1")
+	ring.AddNode("node-2")
+	ring.AddNode("node-3")
+
+	succ := ring.SuccessorAfterRemoval("node-1")
+	if succ == "" {
+		t.Fatal("SuccessorAfterRemoval should return a node")
+	}
+	if succ == "node-1" {
+		t.Error("successor should not be the node itself")
+	}
+	// node-1 is removed, successor must be one of the remaining nodes.
+	if succ != "node-2" && succ != "node-3" {
+		t.Errorf("successor = %q, want node-2 or node-3", succ)
+	}
+}
+
+func TestHashRingSuccessorAfterRemoval_NotFound(t *testing.T) {
+	ring := New(150)
+	ring.AddNode("node-1")
+	succ := ring.SuccessorAfterRemoval("nonexistent")
+	if succ != "" {
+		t.Errorf("successor of nonexistent = %q, want empty", succ)
+	}
+}
+
+func TestHashRingSuccessorAfterRemoval_Empty(t *testing.T) {
+	ring := New(150)
+	succ := ring.SuccessorAfterRemoval("node-1")
+	if succ != "" {
+		t.Errorf("successor on empty ring = %q, want empty", succ)
+	}
+}
+
+func TestHashRingReplaceNode(t *testing.T) {
+	ring := New(150)
+	ring.AddNode("node-1")
+	ring.AddNode("node-2")
+	ring.AddNode("node-3")
+
+	// Verify all three nodes own keys.
+	keys1 := 0
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "node-1" {
+			keys1++
+		}
+	}
+	if keys1 == 0 {
+		t.Fatal("node-1 should own some keys before replacement")
+	}
+
+	// Replace node-1 with node-4.
+	ring.ReplaceNode("node-1", "node-4")
+
+	if ring.NodeCount() != 3 {
+		t.Errorf("NodeCount = %d, want 3 after replacement", ring.NodeCount())
+	}
+
+	// node-1 should own zero keys now.
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "node-1" {
+			t.Error("node-1 should own no keys after replacement")
+			break
+		}
+	}
+
+	// node-4 should now own the keys node-1 previously owned.
+	keys4 := 0
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "node-4" {
+			keys4++
+		}
+	}
+	if keys4 != keys1 {
+		t.Errorf("node-4 owns %d keys, want %d (same as node-1 before)", keys4, keys1)
+	}
+}
+
+func TestHashRingReplaceNode_SameNode(t *testing.T) {
+	ring := New(150)
+	ring.AddNode("node-1")
+	ring.AddNode("node-2")
+
+	// Replacing a node with itself should be a no-op (keeps positions).
+	ring.ReplaceNode("node-1", "node-1")
+
+	if ring.NodeCount() != 2 {
+		t.Errorf("NodeCount = %d, want 2", ring.NodeCount())
+	}
+}
+
+func TestHashRingReplaceNode_PromotedNodeAlreadyInRing(t *testing.T) {
+	ring := New(150)
+	ring.AddNode("dead-primary")
+	ring.AddNode("replica-a")
+	ring.AddNode("replica-b")
+
+	// Capture replica-a's OWN keys before replacement.
+	keysA_before := 0
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "replica-a" {
+			keysA_before++
+		}
+	}
+	if keysA_before == 0 {
+		t.Fatal("replica-a should own some keys before replacement")
+	}
+
+	// Capture dead-primary's keys before replacement.
+	keysDead_before := 0
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "dead-primary" {
+			keysDead_before++
+		}
+	}
+	if keysDead_before == 0 {
+		t.Fatal("dead-primary should own some keys before replacement")
+	}
+
+	// Replace dead-primary with replica-a (additive: replica-a keeps its own).
+	ring.ReplaceNode("dead-primary", "replica-a")
+
+	if ring.NodeCount() != 2 {
+		t.Errorf("NodeCount = %d, want 2", ring.NodeCount())
+	}
+
+	// dead-primary should own no keys.
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "dead-primary" {
+			t.Error("dead-primary should own no keys after replacement")
+			break
+		}
+	}
+
+	// replica-a should still own its ORIGINAL keys.
+	keysA_after := 0
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "replica-a" {
+			keysA_after++
+		}
+	}
+	if keysA_after < keysA_before {
+		t.Errorf("replica-a owns %d keys after, had %d before — original range lost",
+			keysA_after, keysA_before)
+	}
+
+	// replica-a should now ALSO own dead-primary's former keys.
+	if keysA_after < keysDead_before {
+		t.Errorf("replica-a owns %d keys total, dead-primary had %d — not all transferred",
+			keysA_after, keysDead_before)
+	}
+
+	// replica-b should still own its own keys (unchanged).
+	keysB := 0
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "replica-b" {
+			keysB++
+		}
+	}
+	if keysB == 0 {
+		t.Error("replica-b should still own keys")
+	}
+}
+
 func TestRebalanceStatus_Complete_Race(t *testing.T) {
 	ring := New(150)
 	rebalancer := NewRebalancer(ring, nil)

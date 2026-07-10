@@ -172,3 +172,82 @@ func (hr *HashRing) Visualize() string {
 	}
 	return result
 }
+
+// SuccessorAfterRemoval returns the first distinct node that would take over
+// ownership of nodeID's positions if nodeID were removed from the ring.
+// Returns "" if nodeID is not in the ring or if removal would leave the ring empty.
+// Caller must NOT hold hr.mu.
+func (hr *HashRing) SuccessorAfterRemoval(nodeID string) string {
+	hr.mu.RLock()
+	defer hr.mu.RUnlock()
+
+	if len(hr.ring) == 0 {
+		return ""
+	}
+
+	// Find the first position belonging to nodeID.
+	var firstIdx int
+	found := false
+	for i, pos := range hr.ring {
+		if hr.nodes[pos] == nodeID {
+			firstIdx = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ""
+	}
+
+	// Walk clockwise from firstIdx (skipping nodeID's own positions)
+	// until we find a different node.
+	n := len(hr.ring)
+	for i := 1; i <= n; i++ {
+		pos := hr.ring[(firstIdx+i)%n]
+		if hr.nodes[pos] != nodeID {
+			return hr.nodes[pos]
+		}
+	}
+	return ""
+}
+
+// ReplaceNode removes oldNodeID from the ring and assigns its virtual-node
+// positions to newNodeID. If newNodeID was already in the ring, its OWN
+// pre-existing positions are PRESERVED — newNodeID ends up owning both its
+// original positions AND oldNodeID's former positions. This is additive,
+// not destructive: the promoted node keeps its own key range and gains the
+// dead primary's range on top.
+//
+// Caller must NOT hold hr.mu.
+func (hr *HashRing) ReplaceNode(oldNodeID, newNodeID string) {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+
+	if len(hr.ring) == 0 {
+		return
+	}
+
+	// Collect positions belonging to oldNodeID.
+	var oldPositions []uint32
+	newRing := hr.ring[:0]
+	for _, pos := range hr.ring {
+		if hr.nodes[pos] == oldNodeID {
+			oldPositions = append(oldPositions, pos)
+			delete(hr.nodes, pos)
+		} else {
+			// Keep ALL other positions, including newNodeID's own.
+			newRing = append(newRing, pos)
+		}
+	}
+	hr.ring = newRing
+
+	// Assign oldNodeID's former positions to newNodeID.
+	for _, pos := range oldPositions {
+		hr.ring = append(hr.ring, pos)
+		hr.nodes[pos] = newNodeID
+	}
+
+	sort.Slice(hr.ring, func(i, j int) bool {
+		return hr.ring[i] < hr.ring[j]
+	})
+}
