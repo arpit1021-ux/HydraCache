@@ -863,16 +863,13 @@ func TestFailover_MismatchedLagVsRingPosition(t *testing.T) {
 	}
 
 	// Determine which replica is the ring-successor and which is not.
-	var lowLagNode, otherNode string
+	var lowLagNode string
 	if ringSuccessor == "replica-low-lag" {
 		// Ring successor happens to be the low-lag node — swap roles
 		// so we can test the mismatched case.
 		lowLagNode = "replica-ring-succ"
-		otherNode = "replica-low-lag"
 	} else {
 		lowLagNode = "replica-low-lag"
-		otherNode = "ringSuccessor"
-		_ = otherNode
 	}
 
 	// Create ReplicaSet: lowLagNode has lag=1, the other has lag=100.

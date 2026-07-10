@@ -155,6 +155,7 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 			_, _ = h.cache.Delete(key)
 			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 		}
+		h.replicateWrite(cmd.Name, cmd.Args)
 		return &Response{data: []byte("+OK\r\n")}
 	}
 
@@ -177,6 +178,7 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 			}
 			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 		}
+		h.replicateWrite(cmd.Name, cmd.Args)
 		return &Response{data: []byte("+OK\r\n")}
 	}
 
@@ -187,6 +189,7 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 	if err := h.cache.Set(key, val, ttl); err != nil {
 		return &Response{err: err}
 	}
+	h.replicateWrite(cmd.Name, cmd.Args)
 	return &Response{data: []byte("+OK\r\n")}
 }
 
@@ -211,6 +214,7 @@ func (h *Handler) handleDel(cmd *protocol.Command) *Response {
 			count++
 		}
 	}
+	h.replicateWrite(cmd.Name, cmd.Args)
 	return &Response{data: fmt.Appendf(nil, ":%d\r\n", count)}
 }
 
@@ -260,6 +264,7 @@ func (h *Handler) handleExpire(cmd *protocol.Command) *Response {
 	if err := h.cache.Expire(cmd.Args[0], time.Duration(seconds)*time.Second); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
+	h.replicateWrite(cmd.Name, cmd.Args)
 	return &Response{data: []byte(":1\r\n")}
 }
 
@@ -271,6 +276,7 @@ func (h *Handler) handlePersist(cmd *protocol.Command) *Response {
 	if err := h.cache.Persist(cmd.Args[0]); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
+	h.replicateWrite(cmd.Name, cmd.Args)
 	return &Response{data: []byte(":1\r\n")}
 }
 
@@ -300,6 +306,7 @@ func (h *Handler) handleFlushAll(cmd *protocol.Command) *Response {
 		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 	}
 	h.cache.Flush()
+	h.replicateWrite(cmd.Name, cmd.Args)
 	return &Response{data: []byte("+OK\r\n")}
 }
 
