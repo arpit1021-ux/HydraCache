@@ -13,21 +13,23 @@ type CommandDef struct {
 }
 
 var Commands = map[string]CommandDef{
-	"PING":     {Name: "PING", MinArgs: 0, MaxArgs: 1, ReadOnly: true},
-	"SET":      {Name: "SET", MinArgs: 2, MaxArgs: 5, ReadOnly: false},
-	"GET":      {Name: "GET", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
-	"DEL":      {Name: "DEL", MinArgs: 1, MaxArgs: -1, ReadOnly: false},
-	"EXISTS":   {Name: "EXISTS", MinArgs: 1, MaxArgs: -1, ReadOnly: true},
-	"TTL":      {Name: "TTL", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
-	"PTTL":     {Name: "PTTL", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
-	"EXPIRE":   {Name: "EXPIRE", MinArgs: 2, MaxArgs: 2, ReadOnly: false},
-	"PERSIST":  {Name: "PERSIST", MinArgs: 1, MaxArgs: 1, ReadOnly: false},
-	"KEYS":     {Name: "KEYS", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
-	"DBSIZE":   {Name: "DBSIZE", MinArgs: 0, MaxArgs: 0, ReadOnly: true},
-	"FLUSHALL": {Name: "FLUSHALL", MinArgs: 0, MaxArgs: 0, ReadOnly: false},
-	"INFO":     {Name: "INFO", MinArgs: 0, MaxArgs: 1, ReadOnly: true},
-	"CLUSTER":  {Name: "CLUSTER", MinArgs: 1, MaxArgs: -1, ReadOnly: true},
-	"GOSSIP":   {Name: "GOSSIP", MinArgs: 1, MaxArgs: 1, ReadOnly: false},
+	"PING":         {Name: "PING", MinArgs: 0, MaxArgs: 1, ReadOnly: true},
+	"SET":          {Name: "SET", MinArgs: 2, MaxArgs: 5, ReadOnly: false},
+	"GET":          {Name: "GET", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
+	"DEL":          {Name: "DEL", MinArgs: 1, MaxArgs: -1, ReadOnly: false},
+	"EXISTS":       {Name: "EXISTS", MinArgs: 1, MaxArgs: -1, ReadOnly: true},
+	"TTL":          {Name: "TTL", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
+	"PTTL":         {Name: "PTTL", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
+	"EXPIRE":       {Name: "EXPIRE", MinArgs: 2, MaxArgs: 2, ReadOnly: false},
+	"PERSIST":      {Name: "PERSIST", MinArgs: 1, MaxArgs: 1, ReadOnly: false},
+	"KEYS":         {Name: "KEYS", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
+	"DBSIZE":       {Name: "DBSIZE", MinArgs: 0, MaxArgs: 0, ReadOnly: true},
+	"FLUSHALL":     {Name: "FLUSHALL", MinArgs: 0, MaxArgs: 0, ReadOnly: false},
+	"INFO":         {Name: "INFO", MinArgs: 0, MaxArgs: 1, ReadOnly: true},
+	"CLUSTER":      {Name: "CLUSTER", MinArgs: 1, MaxArgs: -1, ReadOnly: true},
+	"GOSSIP":       {Name: "GOSSIP", MinArgs: 1, MaxArgs: 1, ReadOnly: false},
+	"REPLICATE":    {Name: "REPLICATE", MinArgs: 1, MaxArgs: 1, ReadOnly: false},
+	"REPLICA_SYNC": {Name: "REPLICA_SYNC", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
 }
 
 func ValidateCommand(cmd *Command) error {

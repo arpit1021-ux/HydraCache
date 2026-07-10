@@ -1,13 +1,19 @@
 package network
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
+	"github.com/hydracache/hydracache/internal/replication"
 )
 
 type Response struct {
@@ -23,9 +29,12 @@ func (r *Response) WriteTo(encoder *protocol.Encoder) error {
 }
 
 type Handler struct {
-	cache  cache.Cache
-	wal    *persistence.WAL
-	gossip GossipHandler
+	cache    cache.Cache
+	wal      *persistence.WAL
+	gossip   GossipHandler
+	nodeID   string
+	registry *replication.ReplicaRegistry
+	locator  *hashring.Locator
 }
 
 // GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
@@ -45,6 +54,14 @@ func NewHandlerWithWAL(c cache.Cache, wal *persistence.WAL) *Handler {
 // Must be called before the server starts accepting connections.
 func (h *Handler) SetGossip(g GossipHandler) {
 	h.gossip = g
+}
+
+// SetReplication wires replication into the command dispatch.
+// Must be called before the server starts accepting connections.
+func (h *Handler) SetReplication(nodeID string, registry *replication.ReplicaRegistry, locator *hashring.Locator) {
+	h.nodeID = nodeID
+	h.registry = registry
+	h.locator = locator
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {
@@ -81,6 +98,10 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 		return h.handleInfo(cmd)
 	case "GOSSIP":
 		return h.handleGossip(cmd)
+	case "REPLICATE":
+		return h.handleReplicate(cmd)
+	case "REPLICA_SYNC":
+		return h.handleReplicaSync(cmd)
 	default:
 		return &Response{err: fmt.Errorf("unknown command '%s'", cmd.Name)}
 	}
@@ -315,4 +336,166 @@ func (h *Handler) handleGossip(cmd *protocol.Command) *Response {
 		return &Response{err: err}
 	}
 	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(resp), resp)}
+}
+
+// replicateWrite appends an operation to the primary's ReplicationStream and
+// fires async REPLICATE commands to all replica nodes. Called after a
+// successful write (WAL append + cache mutation). Best-effort: replication
+// failures are logged but do not affect the client response.
+func (h *Handler) replicateWrite(cmd string, args []string) {
+	if h.registry == nil || h.locator == nil {
+		return
+	}
+
+	primary := h.locator.PrimaryNode(args[0])
+	if primary != h.nodeID {
+		return // not the primary for this key
+	}
+
+	rs, ok := h.registry.GetReplicaSet(primary)
+	if !ok {
+		return
+	}
+
+	streamInfo, ok := rs.GetReplica(primary)
+	if !ok || streamInfo == nil || streamInfo.Stream == nil {
+		// The primary's own stream is stored in its ReplicaInfo.
+		// If not found, we can't replicate.
+		return
+	}
+
+	op := replication.Operation{
+		Command: cmd,
+		Args:    args,
+		NodeID:  h.nodeID,
+	}
+	streamInfo.Stream.Append(op)
+
+	// Fan out to replicas asynchronously.
+	for _, replica := range rs.ActiveReplicas() {
+		if replica.NodeID == h.nodeID {
+			continue
+		}
+		addr := replica.Address
+		if addr == "" {
+			continue
+		}
+		go h.sendReplicate(addr, op)
+	}
+}
+
+// sendReplicate sends a REPLICATE command to a single replica over TCP.
+// Best-effort: errors are logged but not propagated.
+func (h *Handler) sendReplicate(addr string, op replication.Operation) {
+	payload, err := json.Marshal(op)
+	if err != nil {
+		log.Printf("[replication] marshal error: %v", err)
+		return
+	}
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		log.Printf("[replication] connect to %s failed: %v", shortAddr(addr), err)
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	w := bufio.NewWriter(conn)
+	encoder := protocol.NewEncoder(w)
+	if err := encoder.WriteArrayLen(2); err != nil {
+		log.Printf("[replication] send to %s failed: %v", shortAddr(addr), err)
+		return
+	}
+	if err := encoder.WriteBulkStringRaw("REPLICATE"); err != nil {
+		log.Printf("[replication] send to %s failed: %v", shortAddr(addr), err)
+		return
+	}
+	if err := encoder.WriteBulkStringRaw(string(payload)); err != nil {
+		log.Printf("[replication] send to %s failed: %v", shortAddr(addr), err)
+		return
+	}
+	_ = w.Flush()
+}
+
+// handleReplicate processes an incoming REPLICATE command from the primary.
+// The payload is a JSON-encoded replication.Operation.
+func (h *Handler) handleReplicate(cmd *protocol.Command) *Response {
+	if len(cmd.Args) == 0 {
+		return &Response{err: fmt.Errorf("REPLICATE requires a JSON payload")}
+	}
+
+	var op replication.Operation
+	if err := json.Unmarshal([]byte(cmd.Args[0]), &op); err != nil {
+		return &Response{err: fmt.Errorf("REPLICATE payload parse error: %w", err)}
+	}
+
+	// Apply the command to the local cache.
+	innerCmd := &protocol.Command{Name: op.Command, Args: op.Args}
+	resp := h.Handle(innerCmd)
+	if resp.err != nil {
+		return resp
+	}
+	return &Response{data: []byte("+OK\r\n")}
+}
+
+// SyncResult is returned by handleReplicaSync.
+type SyncResult struct {
+	Status  string                  `json:"status"`
+	Ops     []replication.Operation `json:"ops,omitempty"`
+	LastSeq int64                   `json:"last_seq"`
+}
+
+// handleReplicaSync processes a REPLICA_SYNC command from a reconnecting
+// replica. The replica sends its last known seq; the primary responds with
+// the gap operations or a FULL_SYNC signal.
+func (h *Handler) handleReplicaSync(cmd *protocol.Command) *Response {
+	if len(cmd.Args) == 0 {
+		return &Response{err: fmt.Errorf("REPLICA_SYNC requires lastKnownSeq")}
+	}
+
+	var lastSeq int64
+	if _, err := fmt.Sscanf(cmd.Args[0], "%d", &lastSeq); err != nil {
+		return &Response{err: fmt.Errorf("invalid lastKnownSeq: %w", err)}
+	}
+
+	if h.registry == nil || h.locator == nil {
+		return &Response{err: fmt.Errorf("replication not configured")}
+	}
+
+	// Find the replica set for this node as primary.
+	rs, ok := h.registry.GetReplicaSet(h.nodeID)
+	if !ok {
+		return &Response{err: fmt.Errorf("no replica set for this node")}
+	}
+
+	replicaInfo, ok := rs.GetReplica(h.nodeID)
+	if !ok || replicaInfo == nil || replicaInfo.Stream == nil {
+		return &Response{err: fmt.Errorf("no replication stream")}
+	}
+
+	stream := replicaInfo.Stream
+	latestSeq := stream.LatestSeq()
+
+	// Check if the gap is within the ring buffer.
+	ops := stream.GetSince(lastSeq)
+	if ops == nil && lastSeq < latestSeq {
+		// Gap exceeds the buffer — trigger full sync.
+		result := SyncResult{Status: "FULL_SYNC", LastSeq: latestSeq}
+		data, _ := json.Marshal(result)
+		return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(data), data)}
+	}
+
+	result := SyncResult{
+		Status:  "OK",
+		Ops:     ops,
+		LastSeq: latestSeq,
+	}
+	data, _ := json.Marshal(result)
+	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(data), data)}
+}
+
+func shortAddr(addr string) string {
+	if idx := strings.Index(addr, ":"); idx > 0 {
+		return addr[:idx]
+	}
+	return addr
 }
