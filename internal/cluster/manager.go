@@ -10,6 +10,7 @@ import (
 	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/heartbeat"
 	"github.com/hydracache/hydracache/internal/network"
+	"github.com/hydracache/hydracache/internal/replication"
 )
 
 func shortID(id string) string {
@@ -27,6 +28,7 @@ type Manager struct {
 	gossip     *Gossip
 	detector   *heartbeat.Detector
 	transport  *heartbeat.Transport
+	registry   *replication.ReplicaRegistry
 	mu         sync.RWMutex
 	rebalMu    sync.Mutex
 	stopCh     chan struct{}
@@ -38,6 +40,7 @@ func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing) *Manage
 		topology: topo,
 		selfNode: selfNode,
 		ring:     ring,
+		registry: replication.NewReplicaRegistry(),
 		stopCh:   make(chan struct{}),
 	}
 	m.rebalancer = hashring.NewRebalancer(ring, m.migrateKey)
@@ -96,7 +99,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.topology.SetNodeHealth(nodeID, HealthSuspect)
 	})
 	m.detector.OnNodeDead(func(nodeID string) {
-		_ = m.RemoveNode(nodeID)
+		m.handleNodeDead(nodeID)
 	})
 
 	// Start failure detection and heartbeat transport
@@ -203,6 +206,56 @@ func (m *Manager) removeDeadNode(nodeID string) error {
 	return nil
 }
 
+// handleNodeDead is the OnNodeDead callback. If the dead node was a primary
+// with a ReplicaSet, it triggers promotion constrained to the ring's structural
+// successors (option (a)), then replaces the dead node in the ring so the
+// promoted node takes over its virtual-node positions. If the dead node had
+// no ReplicaSet, it falls through to the plain removeDeadNode path.
+func (m *Manager) handleNodeDead(nodeID string) {
+	rs, hasReplicas := m.registry.GetReplicaSet(nodeID)
+
+	if !hasReplicas {
+		_ = m.RemoveNode(nodeID)
+		return
+	}
+
+	m.rebalMu.Lock()
+	defer m.rebalMu.Unlock()
+
+	// --- Failover: promote best ring-successor replica ---
+	succ := m.ring.SuccessorAfterRemoval(nodeID)
+
+	promo, _ := m.registry.GetPromotion(nodeID)
+	var promotedNode string
+	var promoErr error
+	if promo != nil && succ != "" {
+		promotedNode, promoErr = promo.PromoteBestReplicaFrom(succ)
+	}
+	if promotedNode == "" && promo != nil {
+		// Fallback: no ring-successor match, promote lowest-lag overall
+		// and accept the routing mismatch (degraded mode).
+		promotedNode, promoErr = promo.PromoteBestReplica()
+	}
+
+	if promotedNode != "" && promoErr == nil {
+		log.Printf("[failover] promoting %s to primary (was ring-successor=%v for dead %s)",
+			shortID(promotedNode), succ == promotedNode, shortID(nodeID))
+		// Remove promoted node from old primary's ReplicaSet.
+		rs.RemoveReplica(promotedNode)
+		// Replace dead primary in ring with the promoted node.
+		m.ring.ReplaceNode(nodeID, promotedNode)
+		// Update topology roles.
+		m.topology.SetNodeRole(promotedNode, RoleLeader)
+	} else {
+		log.Printf("[failover] no replica available for promotion of %s: %v", shortID(nodeID), promoErr)
+		m.ring.RemoveNode(nodeID)
+	}
+
+	_ = m.topology.RemoveNode(nodeID)
+	m.registry.Unregister(nodeID)
+	log.Printf("[failover] dead primary %s failover complete", shortID(nodeID))
+}
+
 func (m *Manager) removeGraceful(nodeID string) error {
 	m.rebalMu.Lock()
 
@@ -273,6 +326,10 @@ func (m *Manager) Topology() *Topology {
 
 func (m *Manager) Ring() *hashring.HashRing {
 	return m.ring
+}
+
+func (m *Manager) Registry() *replication.ReplicaRegistry {
+	return m.registry
 }
 
 func (m *Manager) Shutdown() {
