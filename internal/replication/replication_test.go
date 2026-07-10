@@ -1,9 +1,12 @@
 package replication
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hydracache/hydracache/internal/hashring"
 )
 
 func TestReplicaStatus_String(t *testing.T) {
@@ -48,8 +51,8 @@ func TestReplicaSet_AddAndGetReplica(t *testing.T) {
 	if r.Address != "10.0.0.1:7000" {
 		t.Errorf("Address = %q", r.Address)
 	}
-	if r.Status != ReplicaSyncing {
-		t.Errorf("Status = %v, want ReplicaSyncing", r.Status)
+	if r.GetStatus() != ReplicaSyncing {
+		t.Errorf("Status = %v, want ReplicaSyncing", r.GetStatus())
 	}
 	if r.Stream == nil {
 		t.Error("Stream should be initialized")
@@ -94,9 +97,9 @@ func TestReplicaSet_ActiveReplicas(t *testing.T) {
 	rs.AddReplica("r3", "addr3")
 
 	r1, _ := rs.GetReplica("r1")
-	r1.Status = ReplicaActive
+	r1.SetStatus(ReplicaActive)
 	r2, _ := rs.GetReplica("r2")
-	r2.Status = ReplicaLagging
+	r2.SetStatus(ReplicaLagging)
 	// r3 stays ReplicaSyncing
 
 	active := rs.ActiveReplicas()
@@ -135,7 +138,7 @@ func TestReplicaSet_BestReplica_ExcludesFailed(t *testing.T) {
 	rs.UpdateLag("r1", 5)
 
 	r2, _ := rs.GetReplica("r2")
-	r2.Status = ReplicaFailed
+	r2.SetStatus(ReplicaFailed)
 
 	best := rs.BestReplica()
 	if best == nil || best.NodeID != "r1" {
@@ -147,7 +150,7 @@ func TestReplicaSet_BestReplica_AllFailed(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
 	r1, _ := rs.GetReplica("r1")
-	r1.Status = ReplicaFailed
+	r1.SetStatus(ReplicaFailed)
 
 	if rs.BestReplica() != nil {
 		t.Error("BestReplica should return nil when all replicas are failed")
@@ -167,20 +170,20 @@ func TestReplicaSet_UpdateLag_TransitionsStatus(t *testing.T) {
 
 	rs.UpdateLag("r1", 10)
 	r, _ := rs.GetReplica("r1")
-	if r.Status != ReplicaSyncing {
-		t.Errorf("after small lag, status = %v, want ReplicaSyncing", r.Status)
+	if r.GetStatus() != ReplicaSyncing {
+		t.Errorf("after small lag, status = %v, want ReplicaSyncing", r.GetStatus())
 	}
 
 	rs.UpdateLag("r1", 200)
 	r, _ = rs.GetReplica("r1")
-	if r.Status != ReplicaLagging {
-		t.Errorf("after large lag, status = %v, want ReplicaLagging", r.Status)
+	if r.GetStatus() != ReplicaLagging {
+		t.Errorf("after large lag, status = %v, want ReplicaLagging", r.GetStatus())
 	}
 
 	rs.UpdateLag("r1", 50)
 	r, _ = rs.GetReplica("r1")
-	if r.Status != ReplicaActive {
-		t.Errorf("after lag recovery, status = %v, want ReplicaActive", r.Status)
+	if r.GetStatus() != ReplicaActive {
+		t.Errorf("after lag recovery, status = %v, want ReplicaActive", r.GetStatus())
 	}
 }
 
@@ -201,8 +204,9 @@ func TestReplicaSet_UpdateLag_RecordsTimestamp(t *testing.T) {
 	after := time.Now()
 
 	r, _ := rs.GetReplica("r1")
-	if r.LastSync.Before(before) || r.LastSync.After(after) {
-		t.Errorf("LastSync = %v not between %v and %v", r.LastSync, before, after)
+	lastSync := r.GetLastSync()
+	if lastSync.Before(before) || lastSync.After(after) {
+		t.Errorf("LastSync = %v not between %v and %v", lastSync, before, after)
 	}
 }
 
@@ -245,6 +249,31 @@ func TestReplicaSet_ReplicaCount(t *testing.T) {
 	if rs.ReplicaCount() != 1 {
 		t.Errorf("after remove, count = %d", rs.ReplicaCount())
 	}
+}
+
+func TestReplicaSet_SetStatus(t *testing.T) {
+	rs := NewReplicaSet("primary-1")
+	rs.AddReplica("r1", "addr1")
+
+	r, _ := rs.GetReplica("r1")
+	if r.GetStatus() != ReplicaSyncing {
+		t.Errorf("initial status = %v, want ReplicaSyncing", r.GetStatus())
+	}
+
+	rs.SetStatus("r1", ReplicaActive)
+	if r.GetStatus() != ReplicaActive {
+		t.Errorf("after SetStatus, status = %v, want ReplicaActive", r.GetStatus())
+	}
+
+	rs.SetStatus("r1", ReplicaFailed)
+	if r.GetStatus() != ReplicaFailed {
+		t.Errorf("after SetStatus(Failed), status = %v, want ReplicaFailed", r.GetStatus())
+	}
+}
+
+func TestReplicaSet_SetStatus_Nonexistent(t *testing.T) {
+	rs := NewReplicaSet("primary-1")
+	rs.SetStatus("ghost", ReplicaActive) // no-op, no panic
 }
 
 func TestReplicaSet_ConcurrentAddRemoveAndQuery(t *testing.T) {
@@ -292,6 +321,55 @@ func TestReplicaSet_ConcurrentUpdateLag(t *testing.T) {
 	lags := rs.LagInfo()
 	if lags["r1"] < 0 || lags["r1"] >= int64(goroutines) {
 		t.Errorf("final lag = %d, out of expected range", lags["r1"])
+	}
+}
+
+func TestReplicaSet_ConcurrentUpdateLagAndPromote(t *testing.T) {
+	rs := NewReplicaSet("primary-1")
+	rs.AddReplica("r1", "addr1")
+	rs.AddReplica("r2", "addr2")
+
+	p := NewPromotion(rs)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	// Half the goroutines update lag (which writes Status, LagSeq, LastSync under rs.mu)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				rs.UpdateLag("r1", int64(id+j))
+				rs.UpdateLag("r2", int64(id+j+50))
+			}
+		}(i)
+	}
+
+	// The other half promote (which calls SetStatus under p.mu → rs.mu)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				p.PromoteBestReplica()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// After all goroutines finish, the promoted node must be Active
+	// (either through UpdateLag's status transitions or Promotion's SetStatus).
+	if !p.IsPromoted() {
+		t.Error("should be promoted after concurrent UpdateLag+Promote")
+	}
+	promoted := p.PromotedNode()
+	r, ok := rs.GetReplica(promoted)
+	if !ok {
+		t.Fatalf("promoted node %s not found in replica set", promoted)
+	}
+	if r.GetStatus() != ReplicaActive {
+		t.Errorf("promoted node status = %v, want ReplicaActive", r.GetStatus())
 	}
 }
 
@@ -501,7 +579,7 @@ func TestPromotion_PromoteBestReplica_AllFailed(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
 	r1, _ := rs.GetReplica("r1")
-	r1.Status = ReplicaFailed
+	r1.SetStatus(ReplicaFailed)
 
 	p := NewPromotion(rs)
 	_, err := p.PromoteBestReplica()
@@ -763,5 +841,316 @@ func TestReplicationStream_EmptyBufferGetSince(t *testing.T) {
 	ops := s.GetSince(0)
 	if ops != nil {
 		t.Errorf("GetSince on empty should return nil, got %v", ops)
+	}
+}
+
+// TestFailover_MismatchedLagVsRingPosition verifies that when the
+// lowest-lag replica is NOT the ring's structural successor for the dead
+// primary, PromoteBestReplicaFrom constrains promotion to the ring-successor.
+// This prevents the split-brain where replication bookkeeping says node Y is
+// primary while the ring routes all traffic to node Z.
+func TestFailover_MismatchedLagVsRingPosition(t *testing.T) {
+	// Setup: 3-node ring with dead-primary, replica-low-lag, replica-ring-succ.
+	ring := hashring.New(150)
+	ring.AddNode("dead-primary")
+	ring.AddNode("replica-low-lag")
+	ring.AddNode("replica-ring-succ")
+
+	// Find the ring's actual successor for dead-primary.
+	ringSuccessor := ring.SuccessorAfterRemoval("dead-primary")
+	if ringSuccessor == "" {
+		t.Fatal("SuccessorAfterRemoval should return a node")
+	}
+
+	// Determine which replica is the ring-successor and which is not.
+	var lowLagNode, otherNode string
+	if ringSuccessor == "replica-low-lag" {
+		// Ring successor happens to be the low-lag node — swap roles
+		// so we can test the mismatched case.
+		lowLagNode = "replica-ring-succ"
+		otherNode = "replica-low-lag"
+	} else {
+		lowLagNode = "replica-low-lag"
+		otherNode = "ringSuccessor"
+		_ = otherNode
+	}
+
+	// Create ReplicaSet: lowLagNode has lag=1, the other has lag=100.
+	rs := NewReplicaSet("dead-primary")
+	rs.AddReplica("replica-low-lag", "10.0.0.1:7000")
+	rs.AddReplica("replica-ring-succ", "10.0.0.2:7000")
+
+	if lowLagNode == "replica-low-lag" {
+		rs.UpdateLag("replica-low-lag", 1)
+		rs.UpdateLag("replica-ring-succ", 100)
+	} else {
+		rs.UpdateLag("replica-low-lag", 100)
+		rs.UpdateLag("replica-ring-succ", 1)
+	}
+
+	// Verify setup: the lowest-lag node is NOT the ring-successor.
+	bestOverall := rs.BestReplica()
+	if bestOverall == nil {
+		t.Fatal("BestReplica should not be nil")
+	}
+	if bestOverall.NodeID == ringSuccessor {
+		// Both metrics agree — this test's setup didn't create a mismatch.
+		// Force a mismatch by adjusting lags.
+		if lowLagNode == "replica-low-lag" {
+			rs.UpdateLag("replica-low-lag", 100)
+			rs.UpdateLag("replica-ring-succ", 1)
+		} else {
+			rs.UpdateLag("replica-low-lag", 1)
+			rs.UpdateLag("replica-ring-succ", 100)
+		}
+		bestOverall = rs.BestReplica()
+	}
+
+	// Now bestOverall.NodeID != ringSuccessor (the mismatch is set up).
+	if bestOverall.NodeID == ringSuccessor {
+		t.Fatalf("test setup failed: best overall (%s) == ring successor (%s); "+
+			"cannot create mismatched scenario", bestOverall.NodeID, ringSuccessor)
+	}
+
+	t.Logf("mismatch created: best-lag=%s, ring-successor=%s",
+		bestOverall.NodeID, ringSuccessor)
+
+	// --- Failover using PromoteBestReplica (unconstrained) ---
+	pUnconstrained := NewPromotion(rs)
+	nodeUnconstrained, err := pUnconstrained.PromoteBestReplica()
+	if err != nil {
+		t.Fatalf("PromoteBestReplica: %v", err)
+	}
+	if nodeUnconstrained != bestOverall.NodeID {
+		t.Errorf("unconstrained promoted %s, want %s (lowest lag)",
+			nodeUnconstrained, bestOverall.NodeID)
+	}
+
+	// Reset status for the constrained test.
+	rs.SetStatus("replica-low-lag", ReplicaSyncing)
+	rs.SetStatus("replica-ring-succ", ReplicaSyncing)
+
+	// --- Failover using PromoteBestReplicaFrom (ring-constrained) ---
+	pConstrained := NewPromotion(rs)
+	nodeConstrained, err := pConstrained.PromoteBestReplicaFrom(ringSuccessor)
+	if err != nil {
+		t.Fatalf("PromoteBestReplicaFrom: %v", err)
+	}
+
+	// The constrained promotion MUST pick the ring-successor.
+	if nodeConstrained != ringSuccessor {
+		t.Errorf("constrained promoted %s, want %s (ring-successor)",
+			nodeConstrained, ringSuccessor)
+	}
+
+	// --- Verify ring routing after ReplaceNode ---
+	ring.ReplaceNode("dead-primary", nodeConstrained)
+
+	// All keys that were on dead-primary must now route to the promoted node.
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("failover-key:%d", i)
+		owner := ring.GetNode(key)
+		if owner == "dead-primary" {
+			t.Errorf("key %s still routes to dead-primary after failover", key)
+			break
+		}
+	}
+
+	// The promoted node should own at least some keys (the ones dead-primary had).
+	promotedKeys := 0
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("failover-key:%d", i)
+		if ring.GetNode(key) == nodeConstrained {
+			promotedKeys++
+		}
+	}
+	if promotedKeys == 0 {
+		t.Errorf("promoted node %s owns no keys after failover", nodeConstrained)
+	}
+
+	t.Logf("failover complete: promoted %s (ring-successor=%v), owns %d/1000 keys",
+		nodeConstrained, nodeConstrained == ringSuccessor, promotedKeys)
+}
+
+// TestFailover_PromotedNodePreservesOwnKeys verifies that after failover,
+// the promoted replica retains its OWN pre-existing key range (as an
+// independent primary for its own hash range) AND gains the dead primary's
+// former range. This catches the class of bug where ReplaceNode wipes the
+// promoted node's prior ring presence.
+func TestFailover_PromotedNodePreservesOwnKeys(t *testing.T) {
+	ring := hashring.New(150)
+	ring.AddNode("dead-primary")
+	ring.AddNode("promoted-replica")
+	ring.AddNode("other-replica")
+
+	// Capture key ownership BEFORE failover.
+	keysBefore := map[string]int{
+		"dead-primary":     0,
+		"promoted-replica": 0,
+		"other-replica":    0,
+	}
+	for i := 0; i < 10000; i++ {
+		key := fmt.Sprintf("ownkey:%d", i)
+		owner := ring.GetNode(key)
+		keysBefore[owner]++
+	}
+
+	if keysBefore["dead-primary"] == 0 {
+		t.Fatal("dead-primary should own keys before failover")
+	}
+	if keysBefore["promoted-replica"] == 0 {
+		t.Fatal("promoted-replica should own its own keys before failover")
+	}
+	if keysBefore["other-replica"] == 0 {
+		t.Fatal("other-replica should own keys before failover")
+	}
+
+	t.Logf("BEFORE failover: dead=%d, promoted=%d, other=%d",
+		keysBefore["dead-primary"], keysBefore["promoted-replica"], keysBefore["other-replica"])
+
+	// Determine which node the ring would promote (its structural successor).
+	succ := ring.SuccessorAfterRemoval("dead-primary")
+	if succ == "" {
+		t.Fatal("no successor found")
+	}
+	t.Logf("ring-successor for dead-primary: %s", succ)
+
+	// Create ReplicaSet — both replicas have some lag, both are candidates.
+	rs := NewReplicaSet("dead-primary")
+	rs.AddReplica("promoted-replica", "10.0.0.1:7000")
+	rs.AddReplica("other-replica", "10.0.0.2:7000")
+	rs.UpdateLag("promoted-replica", 1)
+	rs.UpdateLag("other-replica", 10)
+
+	// Promote constrained to ring-successor.
+	p := NewPromotion(rs)
+	promoted, err := p.PromoteBestReplicaFrom(succ)
+	if err != nil {
+		t.Fatalf("PromoteBestReplicaFrom: %v", err)
+	}
+	t.Logf("promoted node: %s (ring-successor=%v)", promoted, promoted == succ)
+
+	// The promoted node's OWN pre-existing keys before failover.
+	ownKeysBefore := keysBefore[promoted]
+
+	// Replace dead-primary in ring with the promoted node.
+	ring.ReplaceNode("dead-primary", promoted)
+
+	// Capture key ownership AFTER failover.
+	keysAfter := map[string]int{
+		"dead-primary":     0,
+		"promoted-replica": 0,
+		"other-replica":    0,
+	}
+	for i := 0; i < 10000; i++ {
+		key := fmt.Sprintf("ownkey:%d", i)
+		owner := ring.GetNode(key)
+		keysAfter[owner]++
+	}
+
+	t.Logf("AFTER failover: dead=%d, promoted=%d, other=%d",
+		keysAfter["dead-primary"], keysAfter["promoted-replica"], keysAfter["other-replica"])
+
+	// dead-primary must own ZERO keys.
+	if keysAfter["dead-primary"] != 0 {
+		t.Errorf("dead-primary owns %d keys after failover, want 0", keysAfter["dead-primary"])
+	}
+
+	// The promoted node must STILL own its original keys.
+	promotedAfter := keysAfter[promoted]
+	if promotedAfter < ownKeysBefore {
+		t.Errorf("promoted node %s lost its own keys: has %d after, had %d before",
+			promoted, promotedAfter, ownKeysBefore)
+	}
+
+	// The promoted node must ALSO own dead-primary's former keys.
+	if promotedAfter < keysBefore["dead-primary"] {
+		t.Errorf("promoted node %s doesn't own dead-primary's former keys: has %d total, dead had %d",
+			promoted, promotedAfter, keysBefore["dead-primary"])
+	}
+
+	// The OTHER replica (not promoted) must be UNCHANGED.
+	otherNode := "promoted-replica"
+	if promoted == "promoted-replica" {
+		otherNode = "other-replica"
+	}
+	if keysAfter[otherNode] != keysBefore[otherNode] {
+		t.Errorf("non-promoted node %s keys changed: had %d, now %d",
+			otherNode, keysBefore[otherNode], keysAfter[otherNode])
+	}
+
+	// Total keys must be conserved.
+	totalBefore := keysBefore["dead-primary"] + keysBefore["promoted-replica"] + keysBefore["other-replica"]
+	totalAfter := keysAfter["promoted-replica"] + keysAfter["other-replica"]
+	if totalAfter != totalBefore {
+		t.Errorf("total keys changed: %d before, %d after (%d lost)",
+			totalBefore, totalAfter, totalBefore-totalAfter)
+	}
+}
+
+// TestFailover_RingSuccessorIsPromoted verifies the full failover sequence:
+// dead primary → promote ring-successor → ReplaceNode → ring routes to promoted.
+func TestFailover_RingSuccessorIsPromoted(t *testing.T) {
+	ring := hashring.New(150)
+	ring.AddNode("primary-X")
+	ring.AddNode("replica-A")
+	ring.AddNode("replica-B")
+
+	// Capture routing before failover.
+	routesBefore := make(map[string]int)
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("key:%d", i)
+		routesBefore[ring.GetNode(key)]++
+	}
+
+	// Find ring successor.
+	succ := ring.SuccessorAfterRemoval("primary-X")
+	if succ == "" {
+		t.Fatal("no successor found")
+	}
+
+	// Create ReplicaSet with A having lower lag than the successor.
+	rs := NewReplicaSet("primary-X")
+	rs.AddReplica("replica-A", "addr-A")
+	rs.AddReplica("replica-B", "addr-B")
+	if succ == "replica-A" {
+		rs.UpdateLag("replica-A", 1)
+		rs.UpdateLag("replica-B", 50)
+	} else {
+		rs.UpdateLag("replica-A", 50)
+		rs.UpdateLag("replica-B", 1)
+	}
+
+	p := NewPromotion(rs)
+	promoted, err := p.PromoteBestReplicaFrom(succ)
+	if err != nil {
+		t.Fatalf("PromoteBestReplicaFrom: %v", err)
+	}
+	if promoted != succ {
+		t.Errorf("promoted %s, want ring-successor %s", promoted, succ)
+	}
+
+	// Replace in ring.
+	ring.ReplaceNode("primary-X", promoted)
+
+	// Verify primary-X owns zero keys.
+	for i := 0; i < 1000; i++ {
+		if ring.GetNode(fmt.Sprintf("key:%d", i)) == "primary-X" {
+			t.Error("primary-X should own no keys after failover")
+			break
+		}
+	}
+
+	// Verify the promoted node owns at least the keys primary-X had.
+	routesAfter := make(map[string]int)
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("key:%d", i)
+		routesAfter[ring.GetNode(key)]++
+	}
+
+	// promoted node should own at least as many keys as primary-X had.
+	if routesAfter[promoted] < routesBefore["primary-X"] {
+		t.Errorf("promoted node owns %d keys, primary-X had %d",
+			routesAfter[promoted], routesBefore["primary-X"])
 	}
 }

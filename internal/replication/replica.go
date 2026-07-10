@@ -24,11 +24,18 @@ type ReplicaSet struct {
 type ReplicaInfo struct {
 	NodeID   string
 	Address  string
-	Status   ReplicaStatus
-	LagSeq   int64
-	LastSync time.Time
+	status   atomic.Int32
+	lagSeq   atomic.Int64
+	lastSync atomic.Int64 // UnixNano
 	Stream   *ReplicationStream
 }
+
+func (r *ReplicaInfo) GetStatus() ReplicaStatus  { return ReplicaStatus(r.status.Load()) }
+func (r *ReplicaInfo) SetStatus(s ReplicaStatus) { r.status.Store(int32(s)) }
+func (r *ReplicaInfo) GetLagSeq() int64          { return r.lagSeq.Load() }
+func (r *ReplicaInfo) SetLagSeq(v int64)         { r.lagSeq.Store(v) }
+func (r *ReplicaInfo) GetLastSync() time.Time    { return time.Unix(0, r.lastSync.Load()) }
+func (r *ReplicaInfo) SetLastSync(t time.Time)   { r.lastSync.Store(t.UnixNano()) }
 
 type ReplicaStatus int
 
@@ -65,12 +72,13 @@ func NewReplicaSet(primaryID string) *ReplicaSet {
 func (rs *ReplicaSet) AddReplica(nodeID, address string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	rs.replicas[nodeID] = &ReplicaInfo{
+	info := &ReplicaInfo{
 		NodeID:  nodeID,
 		Address: address,
-		Status:  ReplicaSyncing,
 		Stream:  NewReplicationStream(10000),
 	}
+	info.SetStatus(ReplicaSyncing)
+	rs.replicas[nodeID] = info
 	log.Printf("[replication] added replica %s to primary %s", shortID(nodeID), shortID(rs.primaryID))
 }
 
@@ -78,6 +86,16 @@ func (rs *ReplicaSet) RemoveReplica(nodeID string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	delete(rs.replicas, nodeID)
+}
+
+// SetStatus transitions a replica's status through the ReplicaSet's own mutex,
+// ensuring no cross-lock races with UpdateLag or external callers.
+func (rs *ReplicaSet) SetStatus(nodeID string, status ReplicaStatus) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if r, ok := rs.replicas[nodeID]; ok {
+		r.SetStatus(status)
+	}
 }
 
 func (rs *ReplicaSet) GetReplica(nodeID string) (*ReplicaInfo, bool) {
@@ -92,7 +110,7 @@ func (rs *ReplicaSet) ActiveReplicas() []*ReplicaInfo {
 	defer rs.mu.RUnlock()
 	var active []*ReplicaInfo
 	for _, r := range rs.replicas {
-		if r.Status == ReplicaActive {
+		if r.GetStatus() == ReplicaActive {
 			active = append(active, r)
 		}
 	}
@@ -104,28 +122,40 @@ func (rs *ReplicaSet) BestReplica() *ReplicaInfo {
 	defer rs.mu.RUnlock()
 	var best *ReplicaInfo
 	for _, r := range rs.replicas {
-		if r.Status == ReplicaFailed {
+		if r.GetStatus() == ReplicaFailed {
 			continue
 		}
-		if best == nil || r.LagSeq < best.LagSeq {
+		if best == nil || r.GetLagSeq() < best.GetLagSeq() {
 			best = r
 		}
 	}
 	return best
 }
 
+// BestReplicaFrom selects the lowest-lag non-failed replica whose NodeID
+// matches ringSuccessor. Returns nil if no such replica exists in the set.
+func (rs *ReplicaSet) BestReplicaFrom(ringSuccessor string) *ReplicaInfo {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	r, ok := rs.replicas[ringSuccessor]
+	if !ok || r.GetStatus() == ReplicaFailed {
+		return nil
+	}
+	return r
+}
+
 func (rs *ReplicaSet) UpdateLag(nodeID string, lag int64) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if r, ok := rs.replicas[nodeID]; ok {
-		r.LagSeq = lag
-		r.LastSync = time.Now()
+		r.SetLagSeq(lag)
+		r.SetLastSync(time.Now())
 		rs.lagTracker.Record(nodeID, lag)
 
 		if lag > 100 {
-			r.Status = ReplicaLagging
-		} else if r.Status == ReplicaLagging {
-			r.Status = ReplicaActive
+			r.SetStatus(ReplicaLagging)
+		} else if r.GetStatus() == ReplicaLagging {
+			r.SetStatus(ReplicaActive)
 		}
 	}
 }
@@ -141,7 +171,7 @@ func (rs *ReplicaSet) LagInfo() map[string]int64 {
 	defer rs.mu.RUnlock()
 	lags := make(map[string]int64, len(rs.replicas))
 	for id, r := range rs.replicas {
-		lags[id] = atomic.LoadInt64(&r.LagSeq)
+		lags[id] = r.GetLagSeq()
 	}
 	return lags
 }
