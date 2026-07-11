@@ -305,11 +305,18 @@ func TestScenario_NetworkPartition_TwoNodes(t *testing.T) {
 			}
 			n1 := s.nodes["n1"]
 			n2 := s.nodes["n2"]
-			if n1.Delay == 0 {
-				t.Error("n1 should have delay after partition")
-			}
-			if n2.DropRate == 0 {
-				t.Error("n2 should have packet drop after partition")
+			// The scenario iterates a map (non-deterministic order) and applies
+			// delay to ids[0] and packet drop to ids[1]. Either node could be
+			// first, so verify that exactly one has delay and the other has drop.
+			hasDelay := map[bool]int{true: 0, false: 0}
+			hasDrop := map[bool]int{true: 0, false: 0}
+			hasDelay[n1.Delay > 0]++
+			hasDelay[n2.Delay > 0]++
+			hasDrop[n1.DropRate > 0]++
+			hasDrop[n2.DropRate > 0]++
+			if hasDelay[true] != 1 || hasDrop[true] != 1 {
+				t.Errorf("partition should set delay on exactly one node and drop on the other, got delays=%d drops=%d",
+					hasDelay[true], hasDrop[true])
 			}
 			return
 		}
