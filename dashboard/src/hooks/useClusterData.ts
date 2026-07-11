@@ -3,12 +3,11 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 export interface ClusterNode {
   id: string
   address: string
-  role: 'leader' | 'follower'
-  status: 'healthy' | 'degraded' | 'down'
-  cpu_load: number
-  memory_used_mb: number
-  memory_total_mb: number
-  replication_lag_ms: number
+  role: 'peer' | 'leader' | 'replica'
+  health: 'alive' | 'suspect' | 'dead' | 'left'
+  load: number
+  memory_mb: number
+  replication_lag: number
 }
 
 export interface ClusterData {
@@ -40,61 +39,55 @@ export function useClusterData(pollInterval = 3000) {
                 id: 'node-0',
                 address: '127.0.0.1:8380',
                 role: 'leader',
-                status: 'healthy',
-                cpu_load: 35,
-                memory_used_mb: 2048,
-                memory_total_mb: 8192,
-                replication_lag_ms: 0,
+                health: 'alive',
+                load: 35,
+                memory_mb: 2048,
+                replication_lag: 0,
               },
               {
                 id: 'node-1',
                 address: '127.0.0.1:8381',
-                role: 'follower',
-                status: 'healthy',
-                cpu_load: 42,
-                memory_used_mb: 1856,
-                memory_total_mb: 8192,
-                replication_lag_ms: 5,
+                role: 'replica',
+                health: 'alive',
+                load: 42,
+                memory_mb: 1856,
+                replication_lag: 5,
               },
               {
                 id: 'node-2',
                 address: '127.0.0.1:8382',
-                role: 'follower',
-                status: 'healthy',
-                cpu_load: 28,
-                memory_used_mb: 1536,
-                memory_total_mb: 8192,
-                replication_lag_ms: 8,
+                role: 'replica',
+                health: 'alive',
+                load: 28,
+                memory_mb: 1536,
+                replication_lag: 8,
               },
               {
                 id: 'node-3',
                 address: '127.0.0.1:8383',
-                role: 'follower',
-                status: 'degraded',
-                cpu_load: 78,
-                memory_used_mb: 6144,
-                memory_total_mb: 8192,
-                replication_lag_ms: 45,
+                role: 'replica',
+                health: 'suspect',
+                load: 78,
+                memory_mb: 6144,
+                replication_lag: 45,
               },
               {
                 id: 'node-4',
                 address: '127.0.0.1:8384',
-                role: 'follower',
-                status: 'healthy',
-                cpu_load: 22,
-                memory_used_mb: 1280,
-                memory_total_mb: 8192,
-                replication_lag_ms: 3,
+                role: 'replica',
+                health: 'alive',
+                load: 22,
+                memory_mb: 1280,
+                replication_lag: 3,
               },
               {
                 id: 'node-5',
                 address: '127.0.0.1:8385',
-                role: 'follower',
-                status: 'healthy',
-                cpu_load: 31,
-                memory_used_mb: 1600,
-                memory_total_mb: 8192,
-                replication_lag_ms: 7,
+                role: 'replica',
+                health: 'alive',
+                load: 31,
+                memory_mb: 1600,
+                replication_lag: 7,
               },
             ],
             epoch: Math.floor(Date.now() / 1000),

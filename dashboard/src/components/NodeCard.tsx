@@ -5,26 +5,26 @@ interface NodeCardProps {
   node: ClusterNode
 }
 
-function healthColor(status: string): string {
-  switch (status) {
-    case 'healthy':
+function healthColor(health: string): string {
+  switch (health) {
+    case 'alive':
       return 'border-emerald-500/30 bg-emerald-500/5'
-    case 'degraded':
+    case 'suspect':
       return 'border-amber-500/30 bg-amber-500/5'
-    case 'down':
+    case 'dead':
       return 'border-red-500/30 bg-red-500/5'
     default:
       return 'border-gray-700 bg-gray-800/50'
   }
 }
 
-function statusDot(status: string): string {
-  switch (status) {
-    case 'healthy':
+function statusDot(health: string): string {
+  switch (health) {
+    case 'alive':
       return 'bg-emerald-500'
-    case 'degraded':
+    case 'suspect':
       return 'bg-amber-500'
-    case 'down':
+    case 'dead':
       return 'bg-red-500'
     default:
       return 'bg-gray-500'
@@ -37,7 +37,7 @@ export default function NodeCard({ node }: NodeCardProps) {
   return (
     <div
       className={`relative rounded-xl border p-4 transition-all hover:scale-[1.01] ${healthColor(
-        node.status
+        node.health
       )}`}
     >
       {isLeader && (
@@ -56,8 +56,8 @@ export default function NodeCard({ node }: NodeCardProps) {
           </div>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className={`w-2 h-2 rounded-full ${statusDot(node.status)}`} />
-          <span className="text-xs text-gray-400 capitalize">{node.status}</span>
+          <div className={`w-2 h-2 rounded-full ${statusDot(node.health)}`} />
+          <span className="text-xs text-gray-400 capitalize">{node.health}</span>
         </div>
       </div>
 
@@ -79,18 +79,18 @@ export default function NodeCard({ node }: NodeCardProps) {
           <div className="flex-1">
             <div className="flex justify-between text-[11px] mb-0.5">
               <span className="text-gray-400">CPU</span>
-              <span className="text-gray-300">{node.cpu_load}%</span>
+              <span className="text-gray-300">{node.load}%</span>
             </div>
             <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all ${
-                  node.cpu_load > 80
+                  node.load > 80
                     ? 'bg-red-500'
-                    : node.cpu_load > 60
+                    : node.load > 60
                     ? 'bg-amber-500'
                     : 'bg-emerald-500'
                 }`}
-                style={{ width: `${Math.min(node.cpu_load, 100)}%` }}
+                style={{ width: `${Math.min(node.load, 100)}%` }}
               />
             </div>
           </div>
@@ -100,25 +100,7 @@ export default function NodeCard({ node }: NodeCardProps) {
           <div className="flex-1">
             <div className="flex justify-between text-[11px] mb-0.5">
               <span className="text-gray-400">Memory</span>
-              <span className="text-gray-300">
-                {node.memory_used_mb} / {node.memory_total_mb} MB
-              </span>
-            </div>
-            <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  node.memory_used_mb / node.memory_total_mb > 0.8
-                    ? 'bg-red-500'
-                    : node.memory_used_mb / node.memory_total_mb > 0.6
-                    ? 'bg-amber-500'
-                    : 'bg-cyan-500'
-                }`}
-                style={{
-                  width: `${
-                    Math.min((node.memory_used_mb / node.memory_total_mb) * 100, 100)
-                  }%`,
-                }}
-              />
+              <span className="text-gray-300">{node.memory_mb} MB</span>
             </div>
           </div>
         </div>

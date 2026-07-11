@@ -39,9 +39,9 @@ function StatCard({
 
 export default function Dashboard({ clusterData, stats }: DashboardProps) {
   const nodes = clusterData?.nodes ?? []
-  const healthyCount = nodes.filter((n) => n.status === 'healthy').length
-  const degradedCount = nodes.filter((n) => n.status === 'degraded').length
-  const downCount = nodes.filter((n) => n.status === 'down').length
+  const healthyCount = nodes.filter((n) => n.health === 'alive').length
+  const suspectCount = nodes.filter((n) => n.health === 'suspect').length
+  const downCount = nodes.filter((n) => n.health === 'dead' || n.health === 'left').length
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -67,9 +67,9 @@ export default function Dashboard({ clusterData, stats }: DashboardProps) {
         <StatCard
           icon={AlertTriangle}
           label="Issues"
-          value={degradedCount + downCount}
+          value={suspectCount + downCount}
           color={
-            degradedCount + downCount > 0
+            suspectCount + downCount > 0
               ? 'bg-amber-500/10 text-amber-400'
               : 'bg-gray-500/10 text-gray-400'
           }

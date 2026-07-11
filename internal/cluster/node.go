@@ -26,6 +26,26 @@ func (r Role) String() string {
 	}
 }
 
+func (r Role) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.String())
+}
+
+func (r *Role) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	switch s {
+	case "leader":
+		*r = RoleLeader
+	case "replica":
+		*r = RoleReplica
+	default:
+		*r = RolePeer
+	}
+	return nil
+}
+
 type Health int32
 
 const (
@@ -48,6 +68,30 @@ func (h Health) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+func (h Health) MarshalJSON() ([]byte, error) {
+	return json.Marshal(h.String())
+}
+
+func (h *Health) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	switch s {
+	case "alive":
+		*h = HealthAlive
+	case "suspect":
+		*h = HealthSuspect
+	case "dead":
+		*h = HealthDead
+	case "left":
+		*h = HealthLeft
+	default:
+		*h = HealthAlive
+	}
+	return nil
 }
 
 type Node struct {

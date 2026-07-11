@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -199,14 +200,83 @@ func main() {
 		mux.Handle("/metrics", collector.PrometheusHandler())
 		mux.HandleFunc("/api/cluster", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			data, _ := topo.MarshalJSON()
+
+			type nodeJSON struct {
+				ID             string    `json:"id"`
+				Address        string    `json:"address"`
+				Role           string    `json:"role"`
+				Health         string    `json:"health"`
+				Region         string    `json:"region"`
+				Version        string    `json:"version"`
+				Load           float64   `json:"load"`
+				MemoryMB       int64     `json:"memory_mb"`
+				ReplicationLag int64     `json:"replication_lag"`
+				LastSeen       time.Time `json:"last_seen"`
+				JoinedAt       time.Time `json:"joined_at"`
+				Epoch          uint64    `json:"epoch"`
+				IsReplicaOf    string    `json:"is_replica_of,omitempty"`
+			}
+
+			allNodes := topo.AllNodes()
+			registry := clusterMgr.Registry()
+
+			nodes := make([]nodeJSON, 0, len(allNodes))
+			for _, n := range allNodes {
+				var lag int64
+				if n.IsReplica() {
+					primaryID := registry.FindPrimaryForReplica(n.ID)
+					if primaryID != "" {
+						if rs, ok := registry.GetReplicaSet(primaryID); ok {
+							if info, ok := rs.GetReplica(n.ID); ok {
+								lag = info.GetLagSeq()
+							}
+						}
+					}
+				} else if n.IsLeader() {
+					if rs, ok := registry.GetReplicaSet(n.ID); ok {
+						for _, v := range rs.LagInfo() {
+							if v > lag {
+								lag = v
+							}
+						}
+					}
+				}
+
+				nodes = append(nodes, nodeJSON{
+					ID:             n.ID,
+					Address:        n.Address,
+					Role:           n.GetRole().String(),
+					Health:         n.GetHealth().String(),
+					Region:         n.Region,
+					Version:        n.Version,
+					Load:           n.Load,
+					MemoryMB:       n.MemoryMB,
+					ReplicationLag: lag,
+					LastSeen:       n.LastSeen,
+					JoinedAt:       n.JoinedAt,
+					Epoch:          n.Epoch,
+					IsReplicaOf:    n.IsReplicaOf,
+				})
+			}
+
+			resp := struct {
+				Nodes     []nodeJSON `json:"nodes"`
+				Epoch     uint64     `json:"epoch"`
+				UpdatedAt time.Time  `json:"updated_at"`
+			}{
+				Nodes:     nodes,
+				Epoch:     topo.Epoch(),
+				UpdatedAt: time.Now(),
+			}
+
+			data, _ := json.Marshal(resp)
 			_, _ = w.Write(data)
 		})
 		mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			stats := localCache.Stats()
-			data := fmt.Sprintf(`{"keys":%d,"hits":%d,"misses":%d,"hit_rate":%.4f}`,
-				stats.Keys, stats.Hits, stats.Misses, stats.HitRate)
+			data := fmt.Sprintf(`{"keys":%d,"hits":%d,"misses":%d,"hit_rate":%.1f}`,
+				stats.Keys, stats.Hits, stats.Misses, stats.HitRate*100)
 			_, _ = w.Write([]byte(data))
 		})
 		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

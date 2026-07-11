@@ -67,22 +67,22 @@ export default function Nodes({ clusterData }: NodesProps) {
                     <div className="flex items-center gap-1.5">
                       <div
                         className={`w-2 h-2 rounded-full ${
-                          node.status === 'healthy'
+                          node.health === 'alive'
                             ? 'bg-emerald-500'
-                            : node.status === 'degraded'
+                            : node.health === 'suspect'
                             ? 'bg-amber-500'
                             : 'bg-red-500'
                         }`}
                       />
-                      <span className="text-gray-400 capitalize">{node.status}</span>
+                      <span className="text-gray-400 capitalize">{node.health}</span>
                     </div>
                   </td>
-                  <td className="px-5 py-3 text-right font-mono text-gray-300">{node.cpu_load}%</td>
+                  <td className="px-5 py-3 text-right font-mono text-gray-300">{node.load}%</td>
                   <td className="px-5 py-3 text-right font-mono text-gray-300">
-                    {node.memory_used_mb}/{node.memory_total_mb} MB
+                    {node.memory_mb} MB
                   </td>
                   <td className="px-5 py-3 text-right font-mono text-gray-300">
-                    {node.replication_lag_ms}ms
+                    {node.replication_lag}
                   </td>
                 </tr>
               ))}

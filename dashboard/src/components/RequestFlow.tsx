@@ -67,9 +67,9 @@ export default function RequestFlow({ nodes }: RequestFlowProps) {
               r={10}
               fill="#0f172a"
               stroke={
-                nodes[i].status === 'healthy'
+                nodes[i].health === 'alive'
                   ? '#10b981'
-                  : nodes[i].status === 'degraded'
+                  : nodes[i].health === 'suspect'
                   ? '#f59e0b'
                   : '#ef4444'
               }

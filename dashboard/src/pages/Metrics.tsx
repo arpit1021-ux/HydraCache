@@ -73,26 +73,23 @@ export default function Metrics({ clusterData, stats }: MetricsProps) {
                 <th className="text-left px-5 py-3 font-medium">Node</th>
                 <th className="text-right px-5 py-3 font-medium">CPU Load</th>
                 <th className="text-right px-5 py-3 font-medium">Memory</th>
-                <th className="text-right px-5 py-3 font-medium">Memory %</th>
                 <th className="text-right px-5 py-3 font-medium">Replication Lag</th>
               </tr>
             </thead>
             <tbody>
               {nodes.map((node) => {
-                const memPct = ((node.memory_used_mb / node.memory_total_mb) * 100).toFixed(1)
                 return (
                   <tr
                     key={node.id}
                     className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
                   >
                     <td className="px-5 py-3 font-mono text-white">{node.id}</td>
-                    <td className="px-5 py-3 text-right font-mono text-gray-300">{node.cpu_load}%</td>
+                    <td className="px-5 py-3 text-right font-mono text-gray-300">{node.load}%</td>
                     <td className="px-5 py-3 text-right font-mono text-gray-300">
-                      {node.memory_used_mb}/{node.memory_total_mb} MB
+                      {node.memory_mb} MB
                     </td>
-                    <td className="px-5 py-3 text-right font-mono text-gray-300">{memPct}%</td>
                     <td className="px-5 py-3 text-right font-mono text-gray-300">
-                      {node.replication_lag_ms}ms
+                      {node.replication_lag}
                     </td>
                   </tr>
                 )

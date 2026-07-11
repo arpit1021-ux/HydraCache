@@ -706,6 +706,92 @@ func TestNode_JSONSerialization(t *testing.T) {
 	}
 }
 
+func TestNode_MarshalJSON_StringEnums(t *testing.T) {
+	n := NewNode("n1", "127.0.0.1:7000")
+	n.SetRole(RoleLeader)
+	n.SetHealth(HealthSuspect)
+
+	data, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("raw Unmarshal error: %v", err)
+	}
+
+	role, ok := raw["role"].(string)
+	if !ok || role != "leader" {
+		t.Errorf("role = %v (%T), want string \"leader\"", raw["role"], raw["role"])
+	}
+	health, ok := raw["health"].(string)
+	if !ok || health != "suspect" {
+		t.Errorf("health = %v (%T), want string \"suspect\"", raw["health"], raw["health"])
+	}
+}
+
+func TestRole_MarshalJSON_RoundTrip(t *testing.T) {
+	tests := []struct {
+		role Role
+		want string
+	}{
+		{RolePeer, "peer"},
+		{RoleLeader, "leader"},
+		{RoleReplica, "replica"},
+	}
+	for _, tt := range tests {
+		data, err := json.Marshal(tt.role)
+		if err != nil {
+			t.Fatalf("Marshal error: %v", err)
+		}
+		got := string(data)
+		expected := `"` + tt.want + `"`
+		if got != expected {
+			t.Errorf("Role(%d) marshal = %s, want %s", tt.role, got, expected)
+		}
+
+		var decoded Role
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal error: %v", err)
+		}
+		if decoded != tt.role {
+			t.Errorf("Role roundtrip = %v, want %v", decoded, tt.role)
+		}
+	}
+}
+
+func TestHealth_MarshalJSON_RoundTrip(t *testing.T) {
+	tests := []struct {
+		health Health
+		want   string
+	}{
+		{HealthAlive, "alive"},
+		{HealthSuspect, "suspect"},
+		{HealthDead, "dead"},
+		{HealthLeft, "left"},
+	}
+	for _, tt := range tests {
+		data, err := json.Marshal(tt.health)
+		if err != nil {
+			t.Fatalf("Marshal error: %v", err)
+		}
+		got := string(data)
+		expected := `"` + tt.want + `"`
+		if got != expected {
+			t.Errorf("Health(%d) marshal = %s, want %s", tt.health, got, expected)
+		}
+
+		var decoded Health
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal error: %v", err)
+		}
+		if decoded != tt.health {
+			t.Errorf("Health roundtrip = %v, want %v", decoded, tt.health)
+		}
+	}
+}
+
 func BenchmarkTopology_AddNode(b *testing.B) {
 	topo := NewTopology()
 	b.ResetTimer()

@@ -13,7 +13,7 @@ function lagColor(lag: number): string {
 }
 
 export default function ReplicationStatus({ nodes }: ReplicationStatusProps) {
-  const maxLag = Math.max(...nodes.map((n) => n.replication_lag_ms), 1)
+  const maxLag = Math.max(...nodes.map((n) => n.replication_lag), 1)
 
   return (
     <div className="space-y-3">
@@ -24,13 +24,13 @@ export default function ReplicationStatus({ nodes }: ReplicationStatusProps) {
             <div
               className="h-full rounded-full transition-all duration-700"
               style={{
-                width: `${(node.replication_lag_ms / maxLag) * 100}%`,
-                backgroundColor: lagColor(node.replication_lag_ms),
+                width: `${(node.replication_lag / maxLag) * 100}%`,
+                backgroundColor: lagColor(node.replication_lag),
               }}
             />
           </div>
           <span className="text-xs text-gray-400 w-20 text-right font-mono shrink-0">
-            {node.replication_lag_ms}ms
+            {node.replication_lag}
           </span>
         </div>
       ))}
