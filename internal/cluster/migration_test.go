@@ -119,12 +119,13 @@ func TestMigrateKey_RealMigration(t *testing.T) {
 		t.Errorf("target TTL = %v, want -1 (no expiry)", ttl)
 	}
 	// Source no longer has the key.
-	if _, err := srcCache.Get("plain"); err == nil {
+	if _, err = srcCache.Get("plain"); err == nil {
 		t.Error("source should not have 'plain' after migration")
 	}
 
 	// --- Migrate "ttlkey" (with TTL) ---
-	if err := srcMgr.migrateSingleKey("ttlkey", client); err != nil {
+	err = srcMgr.migrateSingleKey("ttlkey", client)
+	if err != nil {
 		t.Fatalf("migrateSingleKey ttlkey: %v", err)
 	}
 
