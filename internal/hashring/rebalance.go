@@ -24,17 +24,17 @@ func (s *RebalanceStatus) GetMigratedKeys() int64 { return atomic.LoadInt64(&s.m
 func (s *RebalanceStatus) Done() <-chan struct{} { return s.done }
 
 type Rebalancer struct {
-	ring   *HashRing
-	status map[string]*RebalanceStatus
-	mu     sync.RWMutex
-	onKey  func(key, targetNode string) error
+	ring    *HashRing
+	status  map[string]*RebalanceStatus
+	mu      sync.RWMutex
+	onBatch func(keys []string, targetNode string) (int, error)
 }
 
-func NewRebalancer(ring *HashRing, onKey func(key, targetNode string) error) *Rebalancer {
+func NewRebalancer(ring *HashRing, onBatch func(keys []string, targetNode string) (int, error)) *Rebalancer {
 	return &Rebalancer{
-		ring:   ring,
-		status: make(map[string]*RebalanceStatus),
-		onKey:  onKey,
+		ring:    ring,
+		status:  make(map[string]*RebalanceStatus),
+		onBatch: onBatch,
 	}
 }
 
@@ -56,15 +56,22 @@ func (r *Rebalancer) StartRebalance(sourceNode, targetNode string, keys []string
 func (r *Rebalancer) executeRebalance(status *RebalanceStatus, keys []string) {
 	defer close(status.done)
 
-	for _, key := range keys {
-		if r.onKey != nil {
-			if err := r.onKey(key, status.TargetNode); err != nil {
-				log.Printf("[rebalance] failed to migrate key %s: %v", key, err)
-				continue
+	if r.onBatch != nil {
+		migrated, err := r.onBatch(keys, status.TargetNode)
+		if err != nil {
+			sID := status.SourceNode
+			if len(sID) > 8 {
+				sID = sID[:8]
 			}
+			tID := status.TargetNode
+			if len(tID) > 8 {
+				tID = tID[:8]
+			}
+			log.Printf("[rebalance] migration batch failed for %s → %s: %v", sID, tID, err)
 		}
-		atomic.AddInt64(&status.migratedKeys, 1)
+		atomic.AddInt64(&status.migratedKeys, int64(migrated))
 	}
+
 	status.MarkComplete()
 	sID := status.SourceNode
 	if len(sID) > 8 {
@@ -74,8 +81,8 @@ func (r *Rebalancer) executeRebalance(status *RebalanceStatus, keys []string) {
 	if len(tID) > 8 {
 		tID = tID[:8]
 	}
-	log.Printf("[rebalance] completed: %s → %s (%d keys)",
-		sID, tID, status.TotalKeys)
+	log.Printf("[rebalance] completed: %s → %s (%d/%d keys)",
+		sID, tID, status.GetMigratedKeys(), status.TotalKeys)
 }
 
 func (r *Rebalancer) GetStatus(source, target string) *RebalanceStatus {

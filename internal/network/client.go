@@ -85,7 +85,7 @@ func (c *Client) Send(args ...interface{}) (string, error) {
 			return "", nil
 		}
 		data := make([]byte, strLen+2)
-		_, err := c.reader.Read(data)
+		_, err = io.ReadFull(c.reader, data)
 		if err != nil {
 			return "", err
 		}

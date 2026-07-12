@@ -7,8 +7,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/hashring"
 )
+
+func newTestCache() cache.Cache {
+	return cache.New(&cache.Options{
+		EvictionPolicy:       cache.EvictionLRU,
+		EvictionCapacity:     10000,
+		ActiveExpiration:     false,
+		ExpirationInterval:   time.Second,
+		ExpirationSampleSize: 10,
+	})
+}
 
 func TestNewNode_DefaultFields(t *testing.T) {
 	n := NewNode("node-1", "127.0.0.1:7000")
@@ -423,7 +434,7 @@ func TestManager_NewManager(t *testing.T) {
 	self := NewNode("self", "127.0.0.1:7000")
 	topo := NewTopology()
 	ring := hashring.New(150)
-	mgr := NewManager(self, topo, ring)
+	mgr := NewManager(self, topo, ring, newTestCache())
 
 	if mgr.Self() != self {
 		t.Error("Self() should return the self node")
@@ -439,7 +450,7 @@ func TestManager_NewManager(t *testing.T) {
 func TestManager_Start(t *testing.T) {
 	self := NewNode("self", "127.0.0.1:7000")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start error: %v", err)
@@ -453,7 +464,7 @@ func TestManager_Start_DuplicateSelf(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
 	topo.AddNode(self)
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 
 	err := mgr.Start(context.Background())
 	if err == nil {
@@ -464,7 +475,7 @@ func TestManager_Start_DuplicateSelf(t *testing.T) {
 func TestManager_AddRemoveNode(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 
 	n := NewNode("n1", "addr1")
 	if err := mgr.AddNode(n); err != nil {
@@ -482,7 +493,7 @@ func TestManager_PromoteReplica(t *testing.T) {
 	self := NewNode("self", "addr")
 	self.SetRole(RoleLeader)
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	mgr.Start(context.Background())
 
 	repl := NewNode("replica1", "addr1")
@@ -501,7 +512,7 @@ func TestManager_PromoteReplica(t *testing.T) {
 func TestManager_PromoteReplica_NotFound(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 
 	err := mgr.PromoteReplica("nonexistent")
 	if err == nil {
@@ -512,7 +523,7 @@ func TestManager_PromoteReplica_NotFound(t *testing.T) {
 func TestManager_PromoteReplica_NotReplica(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	mgr.Start(context.Background())
 
 	peer := NewNode("peer1", "addr1")
@@ -527,7 +538,7 @@ func TestManager_PromoteReplica_NotReplica(t *testing.T) {
 func TestManager_Bootstrap(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	if err := mgr.Bootstrap([]string{"10.0.0.1:7000", "10.0.0.2:7000"}); err != nil {
 		t.Fatalf("Bootstrap error: %v", err)
 	}
@@ -536,7 +547,7 @@ func TestManager_Bootstrap(t *testing.T) {
 func TestManager_IsLeader(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 
 	if mgr.IsLeader() {
 		t.Error("new manager should not be leader")
@@ -550,7 +561,7 @@ func TestManager_IsLeader(t *testing.T) {
 func TestManager_GetLeaderNode(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	mgr.Start(context.Background())
 
 	if mgr.GetLeaderNode() != nil {
@@ -570,7 +581,7 @@ func TestManager_GetLeaderNode(t *testing.T) {
 func TestManager_String(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	s := mgr.String()
 	if s == "" {
 		t.Error("String() should not be empty")
@@ -580,7 +591,7 @@ func TestManager_String(t *testing.T) {
 func TestManager_Shutdown(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	mgr.Shutdown()
 }
 
@@ -626,7 +637,7 @@ func TestTopology_ConcurrentAddRemoveAndQueries(t *testing.T) {
 func TestManager_ConcurrentOperations(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 	mgr.Start(context.Background())
 
 	const goroutines = 20
@@ -668,7 +679,7 @@ func TestTopology_EpochMonotonicallyIncreases(t *testing.T) {
 func TestManager_StartIdempotent(t *testing.T) {
 	self := NewNode("self", "addr")
 	topo := NewTopology()
-	mgr := NewManager(self, topo, hashring.New(150))
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
 
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("first Start: %v", err)

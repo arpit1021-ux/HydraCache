@@ -131,7 +131,7 @@ func main() {
 	hashRing := hashring.New(cfg.Cluster.VirtualNodes)
 	hashRing.AddNode(cfg.Cluster.NodeID)
 
-	clusterMgr := cluster.NewManager(selfNode, topo, hashRing)
+	clusterMgr := cluster.NewManager(selfNode, topo, hashRing, localCache)
 	if err := clusterMgr.Start(ctx); err != nil {
 		log.Fatalf("Failed to start cluster manager: %v", err)
 	}

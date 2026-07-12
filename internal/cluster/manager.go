@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/heartbeat"
 	"github.com/hydracache/hydracache/internal/network"
@@ -29,21 +30,23 @@ type Manager struct {
 	detector   *heartbeat.Detector
 	transport  *heartbeat.Transport
 	registry   *replication.ReplicaRegistry
+	localCache cache.Cache
 	mu         sync.RWMutex
 	rebalMu    sync.Mutex
 	stopCh     chan struct{}
 	wg         sync.WaitGroup
 }
 
-func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing) *Manager {
+func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing, localCache cache.Cache) *Manager {
 	m := &Manager{
-		topology: topo,
-		selfNode: selfNode,
-		ring:     ring,
-		registry: replication.NewReplicaRegistry(),
-		stopCh:   make(chan struct{}),
+		topology:   topo,
+		selfNode:   selfNode,
+		ring:       ring,
+		localCache: localCache,
+		registry:   replication.NewReplicaRegistry(),
+		stopCh:     make(chan struct{}),
 	}
-	m.rebalancer = hashring.NewRebalancer(ring, m.migrateKey)
+	m.rebalancer = hashring.NewRebalancer(ring, m.migrateKeys)
 	m.gossip = NewGossip(selfNode, topo)
 	m.gossip.SetOnNewNode(func(node *Node) {
 		_ = m.AddNode(node)
@@ -197,20 +200,19 @@ func (m *Manager) launchRebalanceForNewNode(nodeID string) {
 		return
 	}
 
-	prevNode := m.ring.GetNode(affectedKeys[0])
-	if prevNode == "" || prevNode == nodeID {
-		return
-	}
-
 	log.Printf("[cluster] rebalancing %d keys to %s (from %s)",
-		len(affectedKeys), shortID(nodeID), shortID(prevNode))
-	m.rebalancer.StartRebalance(prevNode, nodeID, affectedKeys)
+		len(affectedKeys), shortID(nodeID), shortID(m.selfNode.ID))
+	m.rebalancer.StartRebalance(m.selfNode.ID, nodeID, affectedKeys)
 }
 
 func (m *Manager) collectAffectedKeys(nodeID string) []string {
+	allKeys, err := m.localCache.Keys()
+	if err != nil {
+		log.Printf("[cluster] failed to list local keys: %v", err)
+		return nil
+	}
 	var keys []string
-	for i := 0; i < 1000; i++ {
-		key := fmt.Sprintf("__rebalance:%s:%d", nodeID, i)
+	for _, key := range allKeys {
 		if m.ring.GetNode(key) == nodeID {
 			keys = append(keys, key)
 		}
@@ -328,8 +330,67 @@ func (m *Manager) removeGraceful(nodeID string) error {
 	return nil
 }
 
-func (m *Manager) migrateKey(key, targetNode string) error {
-	log.Printf("[migrate] key=%s → %s (no-op, data transfer not yet implemented)", key, shortID(targetNode))
+// migrateKeys is the batch migration callback invoked by the Rebalancer.
+// It opens a single network.Client to the target, migrates all keys, and
+// closes the connection — amortizing TCP handshake cost across all keys.
+func (m *Manager) migrateKeys(keys []string, targetNode string) (int, error) {
+	node, ok := m.topology.GetNode(targetNode)
+	if !ok {
+		return 0, fmt.Errorf("target node %s not found in topology", targetNode)
+	}
+
+	client := network.NewClient(node.Address)
+	if err := client.Connect(); err != nil {
+		return 0, fmt.Errorf("failed to connect to %s at %s: %w", shortID(targetNode), node.Address, err)
+	}
+	defer client.Close()
+
+	migrated := 0
+	for _, key := range keys {
+		if err := m.migrateSingleKey(key, client); err != nil {
+			log.Printf("[migrate] key=%s → %s failed: %v", key, shortID(targetNode), err)
+			continue
+		}
+		migrated++
+	}
+	return migrated, nil
+}
+
+// migrateSingleKey reads a key's value and TTL from the local cache, sends
+// a SET to the target via the provided client, and on success deletes the
+// key locally. Returns an error on any failure (the caller skips and continues).
+func (m *Manager) migrateSingleKey(key string, client *network.Client) error {
+	value, err := m.localCache.Get(key)
+	if err != nil {
+		return fmt.Errorf("read failed: %w", err)
+	}
+
+	ttl, err := m.localCache.TTL(key)
+	if err != nil {
+		return fmt.Errorf("TTL read failed: %w", err)
+	}
+
+	args := []interface{}{"SET", key, string(value)}
+	if ttl > 0 {
+		remainingMs := ttl.Milliseconds()
+		if remainingMs < 1 {
+			remainingMs = 1
+		}
+		args = append(args, "PX", fmt.Sprintf("%d", remainingMs))
+	}
+
+	resp, err := client.Send(args...)
+	if err != nil {
+		return fmt.Errorf("SET failed: %w", err)
+	}
+	if resp != "OK" {
+		return fmt.Errorf("unexpected SET response: %s", resp)
+	}
+
+	if _, err := m.localCache.Delete(key); err != nil {
+		log.Printf("[migrate] warning: failed to delete local key %s: %v", key, err)
+	}
+
 	return nil
 }
 

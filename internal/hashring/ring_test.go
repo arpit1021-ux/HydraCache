@@ -307,7 +307,9 @@ func TestHashRingReplaceNode_PromotedNodeAlreadyInRing(t *testing.T) {
 
 func TestRebalanceStatus_Complete_Race(t *testing.T) {
 	ring := New(150)
-	rebalancer := NewRebalancer(ring, nil)
+	rebalancer := NewRebalancer(ring, func(keys []string, targetNode string) (int, error) {
+		return len(keys), nil
+	})
 
 	keys := make([]string, 100)
 	for i := range keys {
