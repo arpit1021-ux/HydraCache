@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +30,8 @@ import (
 func main() {
 	configPath := flag.String("config", "", "Path to config file")
 	addr := flag.String("addr", ":7379", "TCP listen address")
+	advertise := flag.String("advertise", "", "Address advertised to other nodes (defaults to -addr)")
+	dataDir := flag.String("data-dir", "", "Directory for WAL and snapshot files (overrides config)")
 	httpAddr := flag.String("http", ":8379", "HTTP API listen address")
 	nodeID := flag.String("id", "", "Node ID (auto-generated if empty)")
 	join := flag.String("join", "", "Address of existing node to join")
@@ -43,6 +47,14 @@ func main() {
 	}
 	cfg.Server.Addr = *addr
 	cfg.HTTP.Addr = *httpAddr
+	if *advertise != "" {
+		cfg.Cluster.AdvertiseAddr = *advertise
+	} else {
+		cfg.Cluster.AdvertiseAddr = *addr
+	}
+	if *dataDir != "" {
+		cfg.WAL.Dir = *dataDir
+	}
 
 	if *nodeID != "" {
 		cfg.Cluster.NodeID = *nodeID
@@ -55,7 +67,7 @@ func main() {
 		cfg.Cluster.NodeID = generateShortID()
 	}
 
-	log.Printf("[hydracache] starting node %s on %s", cfg.Cluster.NodeID[:8], cfg.Server.Addr)
+	log.Printf("[hydracache] starting node %s on %s", shortIDStr(cfg.Cluster.NodeID), cfg.Server.Addr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -114,7 +126,7 @@ func main() {
 
 	// --- Cluster, hash ring, etc. ---
 	topo := cluster.NewTopology()
-	selfNode := cluster.NewNode(cfg.Cluster.NodeID, cfg.Server.Addr)
+	selfNode := cluster.NewNode(cfg.Cluster.NodeID, cfg.Cluster.AdvertiseAddr)
 
 	hashRing := hashring.New(cfg.Cluster.VirtualNodes)
 	hashRing.AddNode(cfg.Cluster.NodeID)
@@ -180,6 +192,7 @@ func main() {
 	}
 
 	tcpServer.SetGossip(clusterMgr.Gossip())
+	tcpServer.SetReplication(cfg.Cluster.NodeID, clusterMgr.Registry(), locator)
 
 	if err := tcpServer.Start(ctx); err != nil {
 		log.Fatalf("Failed to start TCP server: %v", err)
@@ -284,6 +297,19 @@ func main() {
 			_, _ = w.Write([]byte("OK"))
 		})
 
+		// --- Dashboard static files ---
+		dashboardDir := filepath.Join(filepath.Dir(os.Args[0]), "dashboard", "dist")
+		if _, err := os.Stat(dashboardDir); err == nil {
+			dashFS, err := fs.Sub(os.DirFS(dashboardDir), ".")
+			if err == nil {
+				spa := newSPAHandler(dashFS)
+				mux.Handle("/", spa)
+				log.Printf("[main] dashboard served from %s", dashboardDir)
+			}
+		} else {
+			log.Printf("[main] dashboard not found at %s, skipping UI", dashboardDir)
+		}
+
 		go func() {
 			log.Printf("[main] HTTP server listening on %s", cfg.HTTP.Addr)
 			if err := http.ListenAndServe(cfg.HTTP.Addr, mux); err != nil {
@@ -355,4 +381,37 @@ func main() {
 
 func generateShortID() string {
 	return fmt.Sprintf("%08x", time.Now().UnixNano()%0xffffffff)
+}
+
+func shortIDStr(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// spaHandler serves static files from an embedded filesystem, falling back
+// to index.html for any path that doesn't match a real file (SPA routing).
+type spaHandler struct {
+	fs   fs.FS
+	file http.Handler
+}
+
+func newSPAHandler(fsys fs.FS) *spaHandler {
+	return &spaHandler{fs: fsys, file: http.FileServer(http.FS(fsys))}
+}
+
+func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Try to open the requested path.
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "index.html"
+	}
+	if _, err := fs.Stat(h.fs, path); err == nil {
+		h.file.ServeHTTP(w, r)
+		return
+	}
+	// File not found — serve index.html for SPA client-side routing.
+	r.URL.Path = "/"
+	h.file.ServeHTTP(w, r)
 }

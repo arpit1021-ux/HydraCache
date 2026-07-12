@@ -366,8 +366,6 @@ func (h *Handler) replicateWrite(cmd string, args []string) {
 
 	streamInfo, ok := rs.GetReplica(primary)
 	if !ok || streamInfo == nil || streamInfo.Stream == nil {
-		// The primary's own stream is stored in its ReplicaInfo.
-		// If not found, we can't replicate.
 		return
 	}
 

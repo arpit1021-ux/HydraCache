@@ -31,15 +31,17 @@ type HeartbeatEntry struct {
 }
 
 func (h *HeartbeatEntry) RecordInterval() {
-	if len(h.intervals) > 0 {
+	if !h.Timestamp.IsZero() {
 		interval := time.Since(h.Timestamp)
 		h.intervals = append(h.intervals, interval)
 		if len(h.intervals) > 1000 {
 			h.intervals = h.intervals[1:]
 		}
-	} else {
-		h.intervals = append(h.intervals, time.Since(h.Timestamp))
 	}
+	// First heartbeat (Timestamp.IsZero): store the timestamp without
+	// computing an interval — there is no meaningful prior reading.
+	// The first real interval is computed on the next call, where
+	// h.Timestamp holds the actual time of the previous heartbeat.
 	h.Timestamp = time.Now()
 	h.Seq++
 }
@@ -51,14 +53,23 @@ func (h *HeartbeatEntry) Phi(now time.Time) float64 {
 
 	mean, variance := h.stats()
 	stddev := math.Sqrt(variance)
-	if stddev == 0 {
-		stddev = 1
-	}
 
 	elapsed := now.Sub(h.Timestamp).Seconds()
 	meanSec := float64(mean) / float64(time.Second)
+	stddevSec := stddev / float64(time.Second)
 
-	erfcArg := (elapsed - meanSec) / (stddev * math.Sqrt2)
+	// Floor stddev at 10% of mean to prevent hypersensitivity when
+	// intervals are extremely tight (e.g., OS sleep precision). Without
+	// this, a stddev of 1ms with a mean of 1s causes phi to jump to
+	// +Inf with only 100ms of additional delay past the mean.
+	if meanSec > 0 && stddevSec < meanSec*0.1 {
+		stddevSec = meanSec * 0.1
+	}
+	if stddevSec == 0 {
+		stddevSec = 0.01
+	}
+
+	erfcArg := (elapsed - meanSec) / (stddevSec * math.Sqrt2)
 	phi := -math.Log10(0.5 * math.Erfc(erfcArg))
 	return phi
 }

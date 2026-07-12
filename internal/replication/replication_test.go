@@ -51,8 +51,8 @@ func TestReplicaSet_AddAndGetReplica(t *testing.T) {
 	if r.Address != "10.0.0.1:7000" {
 		t.Errorf("Address = %q", r.Address)
 	}
-	if r.GetStatus() != ReplicaSyncing {
-		t.Errorf("Status = %v, want ReplicaSyncing", r.GetStatus())
+	if r.GetStatus() != ReplicaActive {
+		t.Errorf("Status = %v, want ReplicaActive", r.GetStatus())
 	}
 	if r.Stream == nil {
 		t.Error("Stream should be initialized")
@@ -100,7 +100,8 @@ func TestReplicaSet_ActiveReplicas(t *testing.T) {
 	r1.SetStatus(ReplicaActive)
 	r2, _ := rs.GetReplica("r2")
 	r2.SetStatus(ReplicaLagging)
-	// r3 stays ReplicaSyncing
+	r3, _ := rs.GetReplica("r3")
+	r3.SetStatus(ReplicaSyncing) // explicitly set to non-active for this test
 
 	active := rs.ActiveReplicas()
 	if len(active) != 1 {
@@ -170,8 +171,8 @@ func TestReplicaSet_UpdateLag_TransitionsStatus(t *testing.T) {
 
 	rs.UpdateLag("r1", 10)
 	r, _ := rs.GetReplica("r1")
-	if r.GetStatus() != ReplicaSyncing {
-		t.Errorf("after small lag, status = %v, want ReplicaSyncing", r.GetStatus())
+	if r.GetStatus() != ReplicaActive {
+		t.Errorf("after small lag, status = %v, want ReplicaActive", r.GetStatus())
 	}
 
 	rs.UpdateLag("r1", 200)
@@ -256,8 +257,8 @@ func TestReplicaSet_SetStatus(t *testing.T) {
 	rs.AddReplica("r1", "addr1")
 
 	r, _ := rs.GetReplica("r1")
-	if r.GetStatus() != ReplicaSyncing {
-		t.Errorf("initial status = %v, want ReplicaSyncing", r.GetStatus())
+	if r.GetStatus() != ReplicaActive {
+		t.Errorf("initial status = %v, want ReplicaActive", r.GetStatus())
 	}
 
 	rs.SetStatus("r1", ReplicaActive)

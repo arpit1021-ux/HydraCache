@@ -1,11 +1,13 @@
 services:
   cache-node-1:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: hydracache-node-1
     ports:
       - "7379:7379"
       - "8379:8379"
-    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-1"]
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-1", "-advertise", "cache-node-1:7379", "-data-dir", "/data/wal"]
     networks:
       - hydracache
     volumes:
@@ -17,12 +19,14 @@ services:
       retries: 3
 
   cache-node-2:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: hydracache-node-2
     ports:
       - "7380:7379"
       - "8380:8379"
-    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-2", "-join", "cache-node-1:7379"]
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-2", "-advertise", "cache-node-2:7379", "-data-dir", "/data/wal", "-join", "cache-node-1:7379"]
     networks:
       - hydracache
     volumes:
@@ -37,12 +41,14 @@ services:
       retries: 3
 
   cache-node-3:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: hydracache-node-3
     ports:
       - "7381:7379"
       - "8381:8379"
-    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-3", "-join", "cache-node-1:7379"]
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-3", "-advertise", "cache-node-3:7379", "-data-dir", "/data/wal", "-join", "cache-node-1:7379"]
     networks:
       - hydracache
     volumes:
@@ -57,12 +63,14 @@ services:
       retries: 3
 
   cache-node-4:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: hydracache-node-4
     ports:
       - "7382:7379"
       - "8382:8379"
-    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-4", "-join", "cache-node-1:7379"]
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-4", "-advertise", "cache-node-4:7379", "-data-dir", "/data/wal", "-join", "cache-node-1:7379"]
     networks:
       - hydracache
     volumes:
@@ -77,12 +85,14 @@ services:
       retries: 3
 
   cache-node-5:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: hydracache-node-5
     ports:
       - "7383:7379"
       - "8383:8379"
-    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-5", "-join", "cache-node-1:7379"]
+    command: ["-addr", ":7379", "-http", ":8379", "-id", "node-5", "-advertise", "cache-node-5:7379", "-data-dir", "/data/wal", "-join", "cache-node-1:7379"]
     networks:
       - hydracache
     volumes:
@@ -102,7 +112,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     networks:
       - hydracache
 

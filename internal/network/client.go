@@ -11,6 +11,7 @@ import (
 
 type Client struct {
 	addr      string
+	timeout   time.Duration
 	conn      net.Conn
 	reader    *bufio.Reader
 	writer    *bufio.Writer
@@ -19,11 +20,15 @@ type Client struct {
 }
 
 func NewClient(addr string) *Client {
-	return &Client{addr: addr}
+	return &Client{addr: addr, timeout: 5 * time.Second}
+}
+
+func NewClientWithTimeout(addr string, timeout time.Duration) *Client {
+	return &Client{addr: addr, timeout: timeout}
 }
 
 func (c *Client) Connect() error {
-	conn, err := net.DialTimeout("tcp", c.addr, 5*time.Second)
+	conn, err := net.DialTimeout("tcp", c.addr, c.timeout)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", c.addr, err)
 	}

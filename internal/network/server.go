@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
+	"github.com/hydracache/hydracache/internal/replication"
 )
 
 type Server struct {
@@ -164,4 +166,10 @@ func (s *Server) ConnectionCount() int64 {
 // before the server starts accepting connections.
 func (s *Server) SetGossip(g GossipHandler) {
 	s.handler.SetGossip(g)
+}
+
+// SetReplication wires replication into the command handler. Must be called
+// before the server starts accepting connections.
+func (s *Server) SetReplication(nodeID string, registry *replication.ReplicaRegistry, locator *hashring.Locator) {
+	s.handler.SetReplication(nodeID, registry, locator)
 }

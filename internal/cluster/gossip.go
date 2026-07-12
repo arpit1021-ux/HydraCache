@@ -81,6 +81,11 @@ type Gossip struct {
 	incarnation atomic.Uint64
 	mu          sync.Mutex // protects topology mutations during merge
 
+	// onNewNode is called when gossip discovers a previously unknown node.
+	// The manager wires this to its AddNode method so that the ring and
+	// ReplicaRegistry stay in sync with the topology.
+	onNewNode func(node *Node)
+
 	// config
 	interval      time.Duration
 	peersPerRound int
@@ -230,6 +235,12 @@ func isTerminal(state string) bool {
 }
 
 // applyToTopology updates local Topology based on a gossip member state.
+func (g *Gossip) SetOnNewNode(fn func(node *Node)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.onNewNode = fn
+}
+
 func (g *Gossip) applyToTopology(m GossipMember) {
 	switch m.State {
 	case "alive":
@@ -240,6 +251,9 @@ func (g *Gossip) applyToTopology(m GossipMember) {
 			n.SetRole(m.Role)
 			_ = g.topology.AddNode(n) // node may race with another gossip round
 			log.Printf("[gossip] discovered new node %s at %s", shortID(m.ID), m.Address)
+			if g.onNewNode != nil {
+				g.onNewNode(n)
+			}
 		} else {
 			// Existing node — ensure alive
 			if node.GetHealth() != HealthAlive {

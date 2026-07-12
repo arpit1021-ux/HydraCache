@@ -38,6 +38,7 @@ type CacheConfig struct {
 
 type ClusterConfig struct {
 	NodeID            string        `yaml:"node_id"`
+	AdvertiseAddr     string        `yaml:"advertise_addr"`
 	SeedNodes         []string      `yaml:"seed_nodes"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	ElectionTimeout   time.Duration `yaml:"election_timeout"`

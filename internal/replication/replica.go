@@ -77,7 +77,7 @@ func (rs *ReplicaSet) AddReplica(nodeID, address string) {
 		Address: address,
 		Stream:  NewReplicationStream(10000),
 	}
-	info.SetStatus(ReplicaSyncing)
+	info.SetStatus(ReplicaActive)
 	rs.replicas[nodeID] = info
 	log.Printf("[replication] added replica %s to primary %s", shortID(nodeID), shortID(rs.primaryID))
 }

@@ -45,6 +45,9 @@ func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing) *Manage
 	}
 	m.rebalancer = hashring.NewRebalancer(ring, m.migrateKey)
 	m.gossip = NewGossip(selfNode, topo)
+	m.gossip.SetOnNewNode(func(node *Node) {
+		_ = m.AddNode(node)
+	})
 	m.detector = heartbeat.NewDetector(selfNode.ID)
 
 	// Build transport with callbacks to avoid import cycle
@@ -60,8 +63,10 @@ func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing) *Manage
 }
 
 // pingPeer sends a PING to a peer and returns the round-trip time.
+// Uses a short dial timeout to avoid blocking the entire ping loop
+// when one peer is unreachable.
 func (m *Manager) pingPeer(peerID, peerAddr string) (time.Duration, error) {
-	client := network.NewClient(peerAddr)
+	client := network.NewClientWithTimeout(peerAddr, 500*time.Millisecond)
 	start := time.Now()
 	if err := client.Connect(); err != nil {
 		return 0, err
@@ -94,6 +99,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to add self to topology: %w", err)
 	}
 
+	// Register a ReplicaSet for this node (it's a primary for keys on the ring).
+	// The primary's own entry holds the ReplicationStream used by replicateWrite.
+	rs := replication.NewReplicaSet(m.selfNode.ID)
+	rs.AddReplica(m.selfNode.ID, m.selfNode.Address)
+	m.registry.Register(m.selfNode.ID, rs)
+
 	// Wire Detector callbacks to Topology
 	m.detector.OnNodeSuspect(func(nodeID string) {
 		m.topology.SetNodeHealth(nodeID, HealthSuspect)
@@ -103,7 +114,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	})
 
 	// Start failure detection and heartbeat transport
-	m.detector.StartChecking(5 * time.Second)
+	m.detector.StartChecking(1 * time.Second)
 	m.transport.Start()
 
 	// Start gossip
@@ -138,15 +149,38 @@ func (m *Manager) Detector() *heartbeat.Detector {
 }
 
 func (m *Manager) AddNode(node *Node) error {
-	if err := m.topology.AddNode(node); err != nil {
-		return err
-	}
+	// Topology add may fail if gossip already added this node — that's fine,
+	// we still need to register it on the ring and ReplicaRegistry.
+	_ = m.topology.AddNode(node)
 
 	m.rebalMu.Lock()
 	defer m.rebalMu.Unlock()
 
 	m.ring.AddNode(node.ID)
 	log.Printf("[cluster] node %s added to ring", shortID(node.ID))
+
+	// Register a ReplicaSet for the new primary, with all existing alive
+	// nodes (including self) as replicas. This enables replicateWrite on
+	// the new node and handleNodeDead promotion for it.
+	rs := replication.NewReplicaSet(node.ID)
+	rs.AddReplica(node.ID, node.Address)
+	for _, n := range m.topology.AliveNodes() {
+		if n.ID != node.ID {
+			rs.AddReplica(n.ID, n.Address)
+		}
+	}
+	m.registry.Register(node.ID, rs)
+
+	// Also add the new node as a replica to all existing primaries,
+	// so their replicateWrite can fan out to this new node.
+	for _, n := range m.topology.AliveNodes() {
+		if n.ID == node.ID {
+			continue
+		}
+		if existingRS, ok := m.registry.GetReplicaSet(n.ID); ok {
+			existingRS.AddReplica(node.ID, node.Address)
+		}
+	}
 
 	m.launchRebalanceForNewNode(node.ID)
 	return nil
