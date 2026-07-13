@@ -77,3 +77,12 @@ func (rs *ReplicationStream) Clear() {
 	rs.buffer = rs.buffer[:0]
 	rs.start = rs.seq
 }
+
+// BufferStartSeq returns the sequence number of the oldest operation
+// still retained in the ring buffer. If the caller's lastKnownSeq is
+// below this value, the gap exceeds the buffer and a full sync is needed.
+func (rs *ReplicationStream) BufferStartSeq() int64 {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	return rs.start
+}

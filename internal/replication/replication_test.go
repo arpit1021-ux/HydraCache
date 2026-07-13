@@ -51,8 +51,8 @@ func TestReplicaSet_AddAndGetReplica(t *testing.T) {
 	if r.Address != "10.0.0.1:7000" {
 		t.Errorf("Address = %q", r.Address)
 	}
-	if r.GetStatus() != ReplicaActive {
-		t.Errorf("Status = %v, want ReplicaActive", r.GetStatus())
+	if r.GetStatus() != ReplicaSyncing {
+		t.Errorf("Status = %v, want ReplicaSyncing (default before sync completes)", r.GetStatus())
 	}
 	if r.Stream == nil {
 		t.Error("Stream should be initialized")
@@ -117,6 +117,10 @@ func TestReplicaSet_BestReplica(t *testing.T) {
 	rs.AddReplica("r1", "addr1")
 	rs.AddReplica("r2", "addr2")
 	rs.AddReplica("r3", "addr3")
+	// Simulate post-sync: mark active before UpdateLag.
+	rs.SetStatus("r1", ReplicaActive)
+	rs.SetStatus("r2", ReplicaActive)
+	rs.SetStatus("r3", ReplicaActive)
 
 	rs.UpdateLag("r1", 50)
 	rs.UpdateLag("r2", 10)
@@ -135,6 +139,7 @@ func TestReplicaSet_BestReplica_ExcludesFailed(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
 	rs.AddReplica("r2", "addr2")
+	rs.SetStatus("r1", ReplicaActive) // post-sync
 
 	rs.UpdateLag("r1", 5)
 
@@ -168,6 +173,7 @@ func TestReplicaSet_BestReplica_Empty(t *testing.T) {
 func TestReplicaSet_UpdateLag_TransitionsStatus(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
+	rs.SetStatus("r1", ReplicaActive) // post-sync: mark active before testing lag transitions
 
 	rs.UpdateLag("r1", 10)
 	r, _ := rs.GetReplica("r1")
@@ -257,8 +263,8 @@ func TestReplicaSet_SetStatus(t *testing.T) {
 	rs.AddReplica("r1", "addr1")
 
 	r, _ := rs.GetReplica("r1")
-	if r.GetStatus() != ReplicaActive {
-		t.Errorf("initial status = %v, want ReplicaActive", r.GetStatus())
+	if r.GetStatus() != ReplicaSyncing {
+		t.Errorf("initial status = %v, want ReplicaSyncing", r.GetStatus())
 	}
 
 	rs.SetStatus("r1", ReplicaActive)
@@ -534,6 +540,7 @@ func TestNewPromotion(t *testing.T) {
 func TestPromotion_PromoteBestReplica(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
+	rs.SetStatus("r1", ReplicaActive) // post-sync
 	rs.UpdateLag("r1", 5)
 	rs.UpdateLag("r1", 10)
 
@@ -557,6 +564,8 @@ func TestPromotion_PromoteBestReplica_PicksLowestLag(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
 	rs.AddReplica("r2", "addr2")
+	rs.SetStatus("r1", ReplicaActive) // post-sync
+	rs.SetStatus("r2", ReplicaActive) // post-sync
 	rs.UpdateLag("r1", 50)
 	rs.UpdateLag("r2", 5)
 
@@ -589,9 +598,65 @@ func TestPromotion_PromoteBestReplica_AllFailed(t *testing.T) {
 	}
 }
 
+// TestPromotion_ExcludesSyncingReplicas verifies that replicas in
+// ReplicaSyncing state are excluded from promotion candidacy. A replica
+// that hasn't completed its initial sync should never be promoted to
+// primary — it doesn't have the full dataset yet.
+func TestPromotion_ExcludesSyncingReplicas(t *testing.T) {
+	rs := NewReplicaSet("primary-1")
+
+	// r1 is syncing (default after AddReplica), r2 is active.
+	rs.AddReplica("r1", "addr1")
+	rs.AddReplica("r2", "addr2")
+	rs.SetStatus("r2", ReplicaActive)
+	rs.UpdateLag("r2", 5)
+
+	// r1 stays in ReplicaSyncing — should NOT be promoted.
+	p := NewPromotion(rs)
+	node, err := p.PromoteBestReplica()
+	if err != nil {
+		t.Fatalf("PromoteBestReplica: %v", err)
+	}
+	if node != "r2" {
+		t.Errorf("should promote r2 (active), got %s", node)
+	}
+
+	// Verify with BestReplicaFrom too.
+	p2 := NewPromotion(rs)
+	node2, err := p2.PromoteBestReplicaFrom("r1")
+	if err != ErrNoReplicaAvailable {
+		t.Errorf("r1 is syncing — should not be promotable via From, err=%v", err)
+	}
+	if node2 != "" {
+		t.Errorf("PromoteBestReplicaFrom should not return syncing replica, got %s", node2)
+	}
+}
+
+// TestBestReplica_ExcludesSyncing verifies that BestReplica and
+// BestReplicaFrom skip replicas in ReplicaSyncing state.
+func TestBestReplica_ExcludesSyncing(t *testing.T) {
+	rs := NewReplicaSet("primary-1")
+	rs.AddReplica("r1", "addr1") // ReplicaSyncing (default)
+	rs.AddReplica("r2", "addr2")
+	rs.SetStatus("r2", ReplicaActive)
+	rs.UpdateLag("r2", 10)
+
+	best := rs.BestReplica()
+	if best == nil || best.NodeID != "r2" {
+		t.Errorf("BestReplica should skip syncing replicas, got %v", best)
+	}
+
+	// r1 is syncing — BestReplicaFrom should return nil.
+	from := rs.BestReplicaFrom("r1")
+	if from != nil {
+		t.Errorf("BestReplicaFrom should return nil for syncing replica, got %v", from)
+	}
+}
+
 func TestPromotion_ConcurrentPromote(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
+	rs.SetStatus("r1", ReplicaActive) // post-sync
 	rs.UpdateLag("r1", 5)
 
 	p := NewPromotion(rs)
@@ -877,6 +942,8 @@ func TestFailover_MismatchedLagVsRingPosition(t *testing.T) {
 	rs := NewReplicaSet("dead-primary")
 	rs.AddReplica("replica-low-lag", "10.0.0.1:7000")
 	rs.AddReplica("replica-ring-succ", "10.0.0.2:7000")
+	rs.SetStatus("replica-low-lag", ReplicaActive)   // post-sync
+	rs.SetStatus("replica-ring-succ", ReplicaActive) // post-sync
 
 	if lowLagNode == "replica-low-lag" {
 		rs.UpdateLag("replica-low-lag", 1)
@@ -925,8 +992,10 @@ func TestFailover_MismatchedLagVsRingPosition(t *testing.T) {
 	}
 
 	// Reset status for the constrained test.
-	rs.SetStatus("replica-low-lag", ReplicaSyncing)
-	rs.SetStatus("replica-ring-succ", ReplicaSyncing)
+	// Reset both to Active (not Syncing) for the constrained test —
+	// this test validates ring-successor constraint, not sync behavior.
+	rs.SetStatus("replica-low-lag", ReplicaActive)
+	rs.SetStatus("replica-ring-succ", ReplicaActive)
 
 	// --- Failover using PromoteBestReplicaFrom (ring-constrained) ---
 	pConstrained := NewPromotion(rs)
@@ -1017,6 +1086,8 @@ func TestFailover_PromotedNodePreservesOwnKeys(t *testing.T) {
 	rs := NewReplicaSet("dead-primary")
 	rs.AddReplica("promoted-replica", "10.0.0.1:7000")
 	rs.AddReplica("other-replica", "10.0.0.2:7000")
+	rs.SetStatus("promoted-replica", ReplicaActive) // post-sync
+	rs.SetStatus("other-replica", ReplicaActive)    // post-sync
 	rs.UpdateLag("promoted-replica", 1)
 	rs.UpdateLag("other-replica", 10)
 
@@ -1111,6 +1182,8 @@ func TestFailover_RingSuccessorIsPromoted(t *testing.T) {
 	rs := NewReplicaSet("primary-X")
 	rs.AddReplica("replica-A", "addr-A")
 	rs.AddReplica("replica-B", "addr-B")
+	rs.SetStatus("replica-A", ReplicaActive) // post-sync
+	rs.SetStatus("replica-B", ReplicaActive) // post-sync
 	if succ == "replica-A" {
 		rs.UpdateLag("replica-A", 1)
 		rs.UpdateLag("replica-B", 50)

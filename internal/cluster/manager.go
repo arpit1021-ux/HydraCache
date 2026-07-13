@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -33,6 +34,8 @@ type Manager struct {
 	localCache cache.Cache
 	mu         sync.RWMutex
 	rebalMu    sync.Mutex
+	syncMu     sync.Mutex
+	syncing    map[string]struct{} // replica nodeIDs with in-flight sync
 	stopCh     chan struct{}
 	wg         sync.WaitGroup
 }
@@ -44,6 +47,7 @@ func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing, localCa
 		ring:       ring,
 		localCache: localCache,
 		registry:   replication.NewReplicaRegistry(),
+		syncing:    make(map[string]struct{}),
 		stopCh:     make(chan struct{}),
 	}
 	m.rebalancer = hashring.NewRebalancer(ring, m.migrateKeys)
@@ -106,6 +110,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	// The primary's own entry holds the ReplicationStream used by replicateWrite.
 	rs := replication.NewReplicaSet(m.selfNode.ID)
 	rs.AddReplica(m.selfNode.ID, m.selfNode.Address)
+	rs.SetStatus(m.selfNode.ID, replication.ReplicaActive) // primary's own entry is always active
 	m.registry.Register(m.selfNode.ID, rs)
 
 	// Wire Detector callbacks to Topology
@@ -167,21 +172,33 @@ func (m *Manager) AddNode(node *Node) error {
 	// the new node and handleNodeDead promotion for it.
 	rs := replication.NewReplicaSet(node.ID)
 	rs.AddReplica(node.ID, node.Address)
+	rs.SetStatus(node.ID, replication.ReplicaActive) // primary's own entry is always active
 	for _, n := range m.topology.AliveNodes() {
 		if n.ID != node.ID {
 			rs.AddReplica(n.ID, n.Address)
+			rs.SetStatus(n.ID, replication.ReplicaActive) // existing nodes don't need sync
 		}
 	}
 	m.registry.Register(node.ID, rs)
 
 	// Also add the new node as a replica to all existing primaries,
 	// so their replicateWrite can fan out to this new node.
+	// NOTE: Call site analysis — these existing nodes are already serving
+	// their own key ranges independently. They do NOT need catch-up from
+	// this new primary (or vice versa). The rebalance handles key migration
+	// between them. This path is only reachable via gossip-triggered AddNode
+	// (fresh join), NOT via the failover path (handleNodeDead manipulates
+	// ring/topology/registry directly without calling AddNode). Setting
+	// ReplicaActive immediately is correct here.
 	for _, n := range m.topology.AliveNodes() {
 		if n.ID == node.ID {
 			continue
 		}
 		if existingRS, ok := m.registry.GetReplicaSet(n.ID); ok {
 			existingRS.AddReplica(node.ID, node.Address)
+			// ReplicaSyncing by default — initiate async catch-up handshake.
+			m.wg.Add(1)
+			go m.initiateReplicaSync(n.ID, node.ID, node.Address)
 		}
 	}
 
@@ -425,6 +442,200 @@ func (m *Manager) Ring() *hashring.HashRing {
 
 func (m *Manager) Registry() *replication.ReplicaRegistry {
 	return m.registry
+}
+
+// initiateReplicaSync pushes the primary's state to a newly-added replica
+// and transitions it to ReplicaActive on success. Runs in a goroutine with
+// bounded retry and exponential backoff. Respects the manager's stop channel
+// for graceful shutdown.
+//
+// An in-flight guard (syncing map) prevents concurrent or duplicate sync
+// attempts for the same replica — e.g. one from a retry backoff and another
+// from a fresh gossip-triggered AddNode.
+func (m *Manager) initiateReplicaSync(primaryID, replicaID, replicaAddr string) {
+	defer m.wg.Done()
+
+	// Check and claim the in-flight slot. If another goroutine is already
+	// syncing this replica, exit immediately.
+	m.syncMu.Lock()
+	if _, inflight := m.syncing[replicaID]; inflight {
+		m.syncMu.Unlock()
+		log.Printf("[sync] replica %s already syncing — skipping duplicate", shortID(replicaID))
+		return
+	}
+	m.syncing[replicaID] = struct{}{}
+	m.syncMu.Unlock()
+	defer func() {
+		m.syncMu.Lock()
+		delete(m.syncing, replicaID)
+		m.syncMu.Unlock()
+	}()
+
+	const maxRetries = 3
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+
+		if err := m.doReplicaSync(primaryID, replicaID, replicaAddr); err != nil {
+			log.Printf("[sync] attempt %d/%d failed: primary=%s replica=%s err=%v",
+				attempt+1, maxRetries, shortID(primaryID), shortID(replicaID), err)
+			select {
+			case <-m.stopCh:
+				return
+			case <-time.After(backoffs[attempt]):
+			}
+			continue
+		}
+
+		// Sync succeeded — mark replica as Active.
+		if rs, ok := m.registry.GetReplicaSet(primaryID); ok {
+			rs.SetStatus(replicaID, replication.ReplicaActive)
+			log.Printf("[sync] replica %s synced to primary %s — now active",
+				shortID(replicaID), shortID(primaryID))
+		}
+		return
+	}
+
+	// All retries exhausted — leave as ReplicaSyncing (not Failed),
+	// so a future topology event or manual re-add can retry.
+	log.Printf("[sync] all %d retries exhausted for replica %s on primary %s — staying syncing",
+		maxRetries, shortID(replicaID), shortID(primaryID))
+}
+
+// doReplicaSync performs a single sync attempt: pushes the primary's
+// ReplicationStream (gap ops) or full cache snapshot to the replica.
+func (m *Manager) doReplicaSync(primaryID, replicaID, replicaAddr string) error {
+	rs, ok := m.registry.GetReplicaSet(primaryID)
+	if !ok {
+		return fmt.Errorf("no replica set for primary %s", primaryID)
+	}
+
+	primaryInfo, ok := rs.GetReplica(primaryID)
+	if !ok || primaryInfo == nil || primaryInfo.Stream == nil {
+		return fmt.Errorf("no replication stream for primary %s", primaryID)
+	}
+
+	stream := primaryInfo.Stream
+	syncStartSeq := stream.LatestSeq()
+
+	// Decide: gap sync (ops fit in buffer) or full sync (buffer truncated).
+	bufStart := stream.BufferStartSeq()
+	if bufStart > 0 {
+		// Buffer doesn't cover from seq 0 — gap exceeds retention.
+		return m.doFullSync(replicaAddr, primaryID, syncStartSeq)
+	}
+
+	ops := stream.GetSince(0)
+	if len(ops) == 0 && syncStartSeq == 0 {
+		// Brand new primary with no data — nothing to sync.
+		return nil
+	}
+
+	return m.pushGapOps(replicaAddr, ops, syncStartSeq)
+}
+
+// pushGapOps sends historical replication operations to the replica via
+// REPLICATE commands. After the initial batch, it catches up any ops that
+// arrived during the push.
+func (m *Manager) pushGapOps(replicaAddr string, ops []replication.Operation, syncStartSeq int64) error {
+	client := network.NewClient(replicaAddr)
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("connect to replica failed: %w", err)
+	}
+	defer client.Close()
+
+	for _, op := range ops {
+		if err := sendReplicateOp(client, op); err != nil {
+			return fmt.Errorf("push op seq=%d failed: %w", op.Seq, err)
+		}
+	}
+
+	// Catch up any ops that arrived during the push.
+	if rs, ok := m.registry.GetReplicaSet(m.selfNode.ID); ok {
+		if pi, ok := rs.GetReplica(m.selfNode.ID); ok && pi.Stream != nil {
+			remaining := pi.Stream.GetSince(syncStartSeq)
+			for _, op := range remaining {
+				if err := sendReplicateOp(client, op); err != nil {
+					return fmt.Errorf("catch-up op seq=%d failed: %w", op.Seq, err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// doFullSync transfers the primary's entire cache snapshot to the replica
+// using FLUSHALL + SET commands, then replays any ops that arrived during
+// the transfer.
+func (m *Manager) doFullSync(replicaAddr, primaryID string, syncStartSeq int64) error {
+	lc, ok := m.localCache.(*cache.LocalCache)
+	if !ok {
+		return fmt.Errorf("local cache does not support Snapshot()")
+	}
+
+	snapshot := lc.Snapshot()
+
+	client := network.NewClient(replicaAddr)
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("connect to replica for full sync failed: %w", err)
+	}
+	defer client.Close()
+
+	// Clear replica state.
+	if _, err := client.Send("FLUSHALL"); err != nil {
+		return fmt.Errorf("FLUSHALL failed: %w", err)
+	}
+
+	// Push every entry.
+	now := time.Now().UnixNano()
+	for _, item := range snapshot {
+		args := []interface{}{"SET", item.Key, string(item.Value)}
+		if item.ExpiresAt > 0 {
+			remainingMs := (item.ExpiresAt - now) / int64(time.Millisecond)
+			if remainingMs > 0 {
+				args = append(args, "PX", fmt.Sprintf("%d", remainingMs))
+			}
+		}
+		if _, err := client.Send(args...); err != nil {
+			return fmt.Errorf("SET %q failed: %w", item.Key, err)
+		}
+	}
+
+	// Replay any ops that arrived during the snapshot push.
+	if rs, ok := m.registry.GetReplicaSet(primaryID); ok {
+		if pi, ok := rs.GetReplica(primaryID); ok && pi.Stream != nil {
+			remaining := pi.Stream.GetSince(syncStartSeq)
+			for _, op := range remaining {
+				if err := sendReplicateOp(client, op); err != nil {
+					return fmt.Errorf("post-snapshot op seq=%d failed: %w", op.Seq, err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// sendReplicateOp sends a single REPLICATE command to a replica.
+func sendReplicateOp(client *network.Client, op replication.Operation) error {
+	payload, err := json.Marshal(op)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	resp, err := client.Send("REPLICATE", string(payload))
+	if err != nil {
+		return err
+	}
+	if resp != "OK" {
+		return fmt.Errorf("unexpected response: %s", resp)
+	}
+	return nil
 }
 
 func (m *Manager) Shutdown() {

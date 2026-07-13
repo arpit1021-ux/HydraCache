@@ -99,6 +99,9 @@ func TestBestReplicaFrom(t *testing.T) {
 	rs.AddReplica("r1", "addr1")
 	rs.AddReplica("r2", "addr2")
 	rs.AddReplica("r3", "addr3")
+	rs.SetStatus("r1", ReplicaActive) // post-sync
+	rs.SetStatus("r2", ReplicaActive) // post-sync
+	rs.SetStatus("r3", ReplicaActive) // post-sync
 
 	rs.UpdateLag("r1", 5)
 	rs.UpdateLag("r2", 1)
@@ -136,6 +139,8 @@ func TestPromoteBestReplicaFrom(t *testing.T) {
 	rs := NewReplicaSet("primary-1")
 	rs.AddReplica("r1", "addr1")
 	rs.AddReplica("r2", "addr2")
+	rs.SetStatus("r1", ReplicaActive) // post-sync
+	rs.SetStatus("r2", ReplicaActive) // post-sync
 	rs.UpdateLag("r1", 50)
 	rs.UpdateLag("r2", 5)
 

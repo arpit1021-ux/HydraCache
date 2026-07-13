@@ -77,9 +77,12 @@ func (rs *ReplicaSet) AddReplica(nodeID, address string) {
 		Address: address,
 		Stream:  NewReplicationStream(10000),
 	}
-	info.SetStatus(ReplicaActive)
+	// Status defaults to ReplicaSyncing (iota 0). The caller is
+	// responsible for transitioning to ReplicaActive once the sync
+	// handshake completes — or immediately for entries that don't
+	// need catch-up (e.g. the primary's own entry).
 	rs.replicas[nodeID] = info
-	log.Printf("[replication] added replica %s to primary %s", shortID(nodeID), shortID(rs.primaryID))
+	log.Printf("[replication] added replica %s to primary %s (status=syncing)", shortID(nodeID), shortID(rs.primaryID))
 }
 
 func (rs *ReplicaSet) RemoveReplica(nodeID string) {
@@ -122,7 +125,8 @@ func (rs *ReplicaSet) BestReplica() *ReplicaInfo {
 	defer rs.mu.RUnlock()
 	var best *ReplicaInfo
 	for _, r := range rs.replicas {
-		if r.GetStatus() == ReplicaFailed {
+		switch r.GetStatus() {
+		case ReplicaFailed, ReplicaSyncing:
 			continue
 		}
 		if best == nil || r.GetLagSeq() < best.GetLagSeq() {
@@ -132,13 +136,17 @@ func (rs *ReplicaSet) BestReplica() *ReplicaInfo {
 	return best
 }
 
-// BestReplicaFrom selects the lowest-lag non-failed replica whose NodeID
-// matches ringSuccessor. Returns nil if no such replica exists in the set.
+// BestReplicaFrom selects the lowest-lag non-failed, non-syncing replica
+// whose NodeID matches ringSuccessor. Returns nil if no such replica exists.
 func (rs *ReplicaSet) BestReplicaFrom(ringSuccessor string) *ReplicaInfo {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 	r, ok := rs.replicas[ringSuccessor]
-	if !ok || r.GetStatus() == ReplicaFailed {
+	if !ok {
+		return nil
+	}
+	switch r.GetStatus() {
+	case ReplicaFailed, ReplicaSyncing:
 		return nil
 	}
 	return r

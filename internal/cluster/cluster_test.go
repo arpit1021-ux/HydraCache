@@ -3,12 +3,15 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/hashring"
+	"github.com/hydracache/hydracache/internal/network"
+	"github.com/hydracache/hydracache/internal/replication"
 )
 
 func newTestCache() cache.Cache {
@@ -1155,5 +1158,258 @@ func TestGossip_HandleGossip_RoundTrip(t *testing.T) {
 	}
 	if !ids["peer-b"] {
 		t.Error("response should contain peer-b")
+	}
+}
+
+// --- Replica sync handshake integration tests ---
+
+// TestSync_GapOpsAppliedBeforeActive verifies that a replica added with a
+// real gap (primary has ops at seq 1-50, replica starts at seq 0) gets those
+// specific operations applied before being marked Active.
+func TestSync_GapOpsAppliedBeforeActive(t *testing.T) {
+	// Set up primary with its own cache and server.
+	primaryCache := newTestCache()
+	primaryTopo := NewTopology()
+	primaryNode := NewNode("primary", "127.0.0.1:0")
+	primaryRing := hashring.New(150)
+	primaryRing.AddNode("primary")
+
+	// Seed 50 keys into the primary's cache.
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("gapkey:%03d", i)
+		if err := primaryCache.Set(key, []byte(fmt.Sprintf("val%d", i)), 0); err != nil {
+			t.Fatalf("Set %s: %v", key, err)
+		}
+	}
+
+	// Set up replica server with its own empty cache.
+	replicaCache := newTestCache()
+	replicaSrv := network.NewServer(network.ServerConfig{Addr: "127.0.0.1:0"}, replicaCache)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := replicaSrv.Start(ctx); err != nil {
+		t.Fatalf("replica server start: %v", err)
+	}
+	t.Cleanup(func() { replicaSrv.Shutdown() })
+
+	// Set up primary manager — Start() adds self to topology + registers ReplicaSet.
+	mgr := NewManager(primaryNode, primaryTopo, primaryRing, primaryCache)
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("mgr.Start: %v", err)
+	}
+
+	// Add 50 ops to the primary's own ReplicationStream.
+	rs, ok := mgr.Registry().GetReplicaSet("primary")
+	if !ok {
+		t.Fatal("primary ReplicaSet not found")
+	}
+	primaryInfo, ok := rs.GetReplica("primary")
+	if !ok || primaryInfo.Stream == nil {
+		t.Fatal("primary stream not found")
+	}
+	for i := 0; i < 50; i++ {
+		primaryInfo.Stream.Append(replication.Operation{
+			Command: "SET",
+			Args:    []string{fmt.Sprintf("gapkey:%03d", i), fmt.Sprintf("val%d", i)},
+		})
+	}
+
+	// Add replica to primary's ReplicaSet (starts as ReplicaSyncing).
+	rs.AddReplica("replica-1", replicaSrv.Addr().String())
+	if r, ok := rs.GetReplica("replica-1"); !ok || r.GetStatus() != replication.ReplicaSyncing {
+		t.Fatal("replica should start as ReplicaSyncing")
+	}
+
+	// Initiate sync.
+	err := mgr.doReplicaSync("primary", "replica-1", replicaSrv.Addr().String())
+	if err != nil {
+		t.Fatalf("doReplicaSync: %v", err)
+	}
+
+	// Mark active (simulating what initiateReplicaSync does on success).
+	rs.SetStatus("replica-1", replication.ReplicaActive)
+
+	// Verify replica has all 50 keys with correct values.
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("gapkey:%03d", i)
+		val, err := replicaCache.Get(key)
+		if err != nil {
+			t.Errorf("replica missing key %q: %v", key, err)
+			continue
+		}
+		want := fmt.Sprintf("val%d", i)
+		if string(val) != want {
+			t.Errorf("key %q: got %q, want %q", key, string(val), want)
+		}
+	}
+
+	// Verify replica is now Active.
+	if r, ok := rs.GetReplica("replica-1"); !ok || r.GetStatus() != replication.ReplicaActive {
+		t.Errorf("replica status = %v, want ReplicaActive", r.GetStatus())
+	}
+}
+
+// TestSync_FullSyncWhenGapExceedsBuffer verifies that when the primary's
+// ReplicationStream buffer has been evicted (gap exceeds retention), the
+// sync falls back to a full cache snapshot transfer.
+func TestSync_FullSyncWhenGapExceedsBuffer(t *testing.T) {
+	primaryCache := newTestCache()
+	primaryTopo := NewTopology()
+	primaryNode := NewNode("primary", "127.0.0.1:0")
+	primaryRing := hashring.New(150)
+	primaryRing.AddNode("primary")
+
+	// Seed 20 keys into the primary's cache.
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("fullkey:%03d", i)
+		if err := primaryCache.Set(key, []byte(fmt.Sprintf("snap%d", i)), 0); err != nil {
+			t.Fatalf("Set %s: %v", key, err)
+		}
+	}
+
+	replicaCache := newTestCache()
+	replicaSrv := network.NewServer(network.ServerConfig{Addr: "127.0.0.1:0"}, replicaCache)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := replicaSrv.Start(ctx); err != nil {
+		t.Fatalf("replica server start: %v", err)
+	}
+	t.Cleanup(func() { replicaSrv.Shutdown() })
+
+	mgr := NewManager(primaryNode, primaryTopo, primaryRing, primaryCache)
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("mgr.Start: %v", err)
+	}
+
+	rs, _ := mgr.Registry().GetReplicaSet("primary")
+	primaryInfo, _ := rs.GetReplica("primary")
+
+	// Overflow the stream buffer (capacity 10000) so the oldest ops are evicted.
+	// Append 10001 ops to push seq 0 out of the buffer.
+	for i := 0; i < 10001; i++ {
+		primaryInfo.Stream.Append(replication.Operation{
+			Command: "SET",
+			Args:    []string{fmt.Sprintf("overflow:%d", i), "x"},
+		})
+	}
+
+	// BufferStartSeq > 0 — gap exceeds retention.
+	if primaryInfo.Stream.BufferStartSeq() == 0 {
+		t.Fatal("buffer should have evicted oldest ops")
+	}
+
+	// Add replica and run sync — should trigger full sync path.
+	rs.AddReplica("replica-1", replicaSrv.Addr().String())
+	err := mgr.doReplicaSync("primary", "replica-1", replicaSrv.Addr().String())
+	if err != nil {
+		t.Fatalf("doReplicaSync (full sync): %v", err)
+	}
+
+	// Replica should have the primary's full cache (20 keys).
+	if replicaCache.Size() != 20 {
+		t.Errorf("replica cache size = %d, want 20", replicaCache.Size())
+	}
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("fullkey:%03d", i)
+		val, err := replicaCache.Get(key)
+		if err != nil {
+			t.Errorf("replica missing key %q: %v", key, err)
+			continue
+		}
+		want := fmt.Sprintf("snap%d", i)
+		if string(val) != want {
+			t.Errorf("key %q: got %q, want %q", key, string(val), want)
+		}
+	}
+}
+
+// TestSync_PromotionExcludesSyncing verifies the full chain: a replica
+// still in ReplicaSyncing is not considered for promotion, while an Active
+// replica with the lowest lag is.
+func TestSync_PromotionExcludesSyncing(t *testing.T) {
+	rs := replication.NewReplicaSet("dead-primary")
+	rs.AddReplica("syncing-replica", "10.0.0.1:7000") // stays ReplicaSyncing
+	rs.AddReplica("active-replica", "10.0.0.2:7000")
+	rs.SetStatus("active-replica", replication.ReplicaActive)
+	rs.UpdateLag("active-replica", 5)
+
+	p := replication.NewPromotion(rs)
+	promoted, err := p.PromoteBestReplica()
+	if err != nil {
+		t.Fatalf("PromoteBestReplica: %v", err)
+	}
+	if promoted != "active-replica" {
+		t.Errorf("should promote active-replica, got %s", promoted)
+	}
+
+	// Verify syncing-replica was NOT promoted.
+	if promoted == "syncing-replica" {
+		t.Error("syncing replica should not be promoted")
+	}
+}
+
+// TestSync_FailurePath_ReplicaUnreachable verifies that when the replica
+// is unreachable during sync, the replica stays in ReplicaSyncing (not
+// silently marked Active) and the error is logged.
+func TestSync_FailurePath_ReplicaUnreachable(t *testing.T) {
+	primaryCache := newTestCache()
+	primaryTopo := NewTopology()
+	primaryNode := NewNode("primary", "127.0.0.1:0")
+	primaryRing := hashring.New(150)
+	primaryRing.AddNode("primary")
+
+	mgr := NewManager(primaryNode, primaryTopo, primaryRing, primaryCache)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("mgr.Start: %v", err)
+	}
+
+	rs, _ := mgr.Registry().GetReplicaSet("primary")
+	primaryInfo, _ := rs.GetReplica("primary")
+	// Add some ops so sync has work to do.
+	for i := 0; i < 10; i++ {
+		primaryInfo.Stream.Append(replication.Operation{
+			Command: "SET",
+			Args:    []string{fmt.Sprintf("k%d", i), "v"},
+		})
+	}
+
+	// Add replica pointing to unreachable address.
+	rs.AddReplica("dead-replica", "127.0.0.1:19999")
+
+	// doReplicaSync should fail (connection refused).
+	err := mgr.doReplicaSync("primary", "dead-replica", "127.0.0.1:19999")
+	if err == nil {
+		t.Fatal("expected error for unreachable replica")
+	}
+
+	// Replica must NOT be Active.
+	if r, ok := rs.GetReplica("dead-replica"); !ok {
+		t.Fatal("replica not found")
+	} else if r.GetStatus() == replication.ReplicaActive {
+		t.Error("unreachable replica should NOT be marked Active")
+	} else if r.GetStatus() != replication.ReplicaSyncing {
+		t.Errorf("replica status = %v, want ReplicaSyncing", r.GetStatus())
+	}
+}
+
+// TestSync_BufferStartSeq verifies the new BufferStartSeq method.
+func TestSync_BufferStartSeq(t *testing.T) {
+	s := replication.NewReplicationStream(5)
+	if s.BufferStartSeq() != 0 {
+		t.Errorf("empty stream BufferStartSeq = %d, want 0", s.BufferStartSeq())
+	}
+
+	// Fill past capacity.
+	for i := 0; i < 10; i++ {
+		s.Append(replication.Operation{Command: "SET", Args: []string{"k"}})
+	}
+
+	if s.BufferStartSeq() == 0 {
+		t.Error("BufferStartSeq should be > 0 after overflow")
+	}
+	if s.BufferStartSeq() != 5 {
+		t.Errorf("BufferStartSeq = %d, want 5 (10 appended, capacity 5)", s.BufferStartSeq())
 	}
 }

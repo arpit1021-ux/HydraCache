@@ -452,6 +452,17 @@ type SyncResult struct {
 // handleReplicaSync processes a REPLICA_SYNC command from a reconnecting
 // replica. The replica sends its last known seq; the primary responds with
 // the gap operations or a FULL_SYNC signal.
+//
+// KNOWN SCOPE BOUNDARY — PULL PATH UNREACHABLE:
+// This handler implements the PRIMARY-SIDE of the REPLICA_SYNC pull protocol
+// (replica → primary). However, NO client-side caller exists yet: no
+// reconnecting replica ever sends REPLICA_SYNC to a primary. The initial
+// sync for newly-added replicas is handled by the PRIMARY-PUSH path in
+// Manager.initiateReplicaSync (which uses REPLICATE/SET commands directly).
+// The REPLICA_SYNC pull path is intentionally preserved for a future
+// reconnecting-replica feature but is currently dead code from the caller's
+// perspective. If you see this handler executing, something external is
+// sending REPLICA_SYNC commands — that path is not wired by this codebase.
 func (h *Handler) handleReplicaSync(cmd *protocol.Command) *Response {
 	if len(cmd.Args) == 0 {
 		return &Response{err: fmt.Errorf("REPLICA_SYNC requires lastKnownSeq")}
