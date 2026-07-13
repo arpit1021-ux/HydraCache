@@ -304,8 +304,16 @@ func TestDeadTargetMidRebalance(t *testing.T) {
 	// Start rebalance in background, then kill the target quickly.
 	status := srcMgr.rebalancer.StartRebalance("src", "dst", dstKeys)
 
-	// Wait briefly so some keys migrate, then shut down the target.
-	time.Sleep(10 * time.Millisecond)
+	// Wait until at least one key has been migrated, then kill the target.
+	// Polling instead of a fixed sleep avoids flakiness on fast CI machines
+	// where the full rebalance completes in <10ms.
+	deadline := time.Now().Add(5 * time.Second)
+	for dstCache.Size() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for any key to migrate to target")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	dstSrv.Shutdown()
 	cancel()
 
