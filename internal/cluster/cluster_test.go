@@ -1161,6 +1161,163 @@ func TestGossip_HandleGossip_RoundTrip(t *testing.T) {
 	}
 }
 
+// --- MarkMemberDead regression tests ---
+
+// TestMarkMemberDead_RejectedAtEqualIncarnation verifies that when a member
+// is marked dead on instance A's table, a stale alive claim at the SAME
+// incarnation is correctly rejected (dead wins at equal incarnation).
+func TestMarkMemberDead_RejectedAtEqualIncarnation(t *testing.T) {
+	topoA := NewTopology()
+	selfA := NewNode("node-a", "a-addr")
+	topoA.AddNode(selfA)
+	gA := NewGossip(selfA, topoA)
+
+	// Add peer B as alive at incarnation 3.
+	gA.Merge([]GossipMember{
+		{ID: "peer-b", Address: "b-addr", State: "alive", Incarnation: 3},
+	})
+
+	m, ok := gA.table.Get("peer-b")
+	if !ok || m.State != "alive" || m.Incarnation != 3 {
+		t.Fatalf("precondition: expected alive inc=3, got %+v", m)
+	}
+
+	// Mark peer-b dead on A's table (at its current incarnation 3).
+	gA.MarkMemberDead("peer-b")
+
+	m, ok = gA.table.Get("peer-b")
+	if !ok || m.State != "dead" || m.Incarnation != 3 {
+		t.Fatalf("after MarkMemberDead: expected dead inc=3, got %+v", m)
+	}
+
+	// Stale alive claim at the SAME incarnation — dead should win.
+	gA.Merge([]GossipMember{
+		{ID: "peer-b", Address: "b-addr", State: "alive", Incarnation: 3},
+	})
+
+	m, ok = gA.table.Get("peer-b")
+	if !ok || m.State != "dead" || m.Incarnation != 3 {
+		t.Fatalf("stale alive at same incarnation should not override dead: got %+v", m)
+	}
+}
+
+// TestMarkMemberDead_RejectedAtLowerIncarnation verifies that a stale alive
+// claim at a LOWER incarnation is also correctly rejected.
+func TestMarkMemberDead_RejectedAtLowerIncarnation(t *testing.T) {
+	topoA := NewTopology()
+	selfA := NewNode("node-a", "a-addr")
+	topoA.AddNode(selfA)
+	gA := NewGossip(selfA, topoA)
+
+	// Simulate: B was alive at inc 5, now dead at inc 5.
+	gA.Merge([]GossipMember{
+		{ID: "peer-b", Address: "b-addr", State: "alive", Incarnation: 5},
+	})
+	gA.MarkMemberDead("peer-b")
+
+	// Stale alive at inc 2 — should be ignored.
+	gA.Merge([]GossipMember{
+		{ID: "peer-b", Address: "b-addr", State: "alive", Incarnation: 2},
+	})
+
+	m, ok := gA.table.Get("peer-b")
+	if !ok || m.State != "dead" || m.Incarnation != 5 {
+		t.Fatalf("stale alive at lower inc should not override dead: got %+v", m)
+	}
+}
+
+// TestMarkMemberDead_SelfRefutationRecovery is the full end-to-end scenario:
+// A marks B dead, B restarts (incarnation 1), B receives A's dead claim,
+// B self-refutes to incarnation 6, B's alive-at-6 reaches A, A adopts it.
+func TestMarkMemberDead_SelfRefutationRecovery(t *testing.T) {
+	// --- Node A's perspective ---
+	topoA := NewTopology()
+	selfA := NewNode("node-a", "a-addr")
+	topoA.AddNode(selfA)
+	gA := NewGossip(selfA, topoA)
+
+	// Node B was alive at incarnation 5.
+	gA.Merge([]GossipMember{
+		{ID: "node-b", Address: "b-addr", State: "alive", Incarnation: 5},
+	})
+
+	// Node A detects B dead, marks it in its gossip table.
+	gA.MarkMemberDead("node-b")
+
+	m, ok := gA.table.Get("node-b")
+	if !ok || m.State != "dead" || m.Incarnation != 5 {
+		t.Fatalf("A: expected dead inc=5, got %+v", m)
+	}
+
+	// --- Node B restarts (new process, incarnation resets to 1) ---
+	topoB := NewTopology()
+	selfB := NewNode("node-b", "b-addr")
+	topoB.AddNode(selfB)
+	gB := NewGossip(selfB, topoB)
+	// Simulate restart: incarnation is already 1 from NewGossip.
+
+	// Step 1: B sends alive/inc=1 to A. A rejects it (dead at 5 wins).
+	gA.Merge([]GossipMember{
+		{ID: "node-b", Address: "b-addr", State: "alive", Incarnation: 1},
+	})
+	m, ok = gA.table.Get("node-b")
+	if !ok || m.State != "dead" || m.Incarnation != 5 {
+		t.Fatalf("A: should still be dead inc=5 after stale alive, got %+v", m)
+	}
+
+	// Step 2: A responds with its table (including dead/inc=5 for B).
+	// B receives this and self-refutes.
+	gA_table := gA.table.Snapshot()
+	aMembers := make([]GossipMember, 0, len(gA_table))
+	for _, member := range gA_table {
+		aMembers = append(aMembers, member)
+	}
+	refuted := gB.Merge(aMembers)
+
+	if !refuted {
+		t.Fatal("B: self-refutation should have occurred")
+	}
+	if gB.Incarnation() != 6 {
+		t.Fatalf("B: expected incarnation 6, got %d", gB.Incarnation())
+	}
+	m, ok = gB.table.Get("node-b")
+	if !ok || m.State != "alive" || m.Incarnation != 6 {
+		t.Fatalf("B: expected alive inc=6, got %+v", m)
+	}
+
+	// Step 3: B's alive/inc=6 reaches A. A should adopt it.
+	gB_table := gB.table.Snapshot()
+	bMembers := make([]GossipMember, 0, len(gB_table))
+	for _, member := range gB_table {
+		bMembers = append(bMembers, member)
+	}
+	gA.Merge(bMembers)
+
+	m, ok = gA.table.Get("node-b")
+	if !ok || m.State != "alive" || m.Incarnation != 6 {
+		t.Fatalf("A: should adopt alive inc=6 from B, got %+v", m)
+	}
+
+	// Verify topology would be updated: node-b should be added back.
+	// (applyToTopology creates the node since it was RemoveNode'd.)
+}
+
+// TestMarkMemberDead_UnknownNode gets a dead entry at incarnation 1 when
+// the node was never in the gossip table.
+func TestMarkMemberDead_UnknownNode(t *testing.T) {
+	topoA := NewTopology()
+	selfA := NewNode("node-a", "a-addr")
+	topoA.AddNode(selfA)
+	gA := NewGossip(selfA, topoA)
+
+	gA.MarkMemberDead("never-seen")
+
+	m, ok := gA.table.Get("never-seen")
+	if !ok || m.State != "dead" || m.Incarnation != 1 {
+		t.Fatalf("expected dead inc=1 for unknown node, got %+v", m)
+	}
+}
+
 // --- Replica sync handshake integration tests ---
 
 // TestSync_GapOpsAppliedBeforeActive verifies that a replica added with a

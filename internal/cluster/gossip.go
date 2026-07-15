@@ -234,7 +234,49 @@ func isTerminal(state string) bool {
 	return state == "dead" || state == "left"
 }
 
-// applyToTopology updates local Topology based on a gossip member state.
+// MarkMemberDead writes a "dead" state entry into gossip's local table for
+// the given nodeID, using whatever incarnation is currently stored for that
+// member. This is called by the manager when a node is locally declared dead
+// so that the death is propagated to peers via the next gossip anti-entropy
+// round.
+//
+// A third party observing a death does NOT bump the incarnation — only the
+// node itself can legitimately bump its own incarnation via self-refutation.
+// Using the current stored incarnation ensures the dead record wins at equal
+// incarnation against any stale alive record peers may still hold, and will
+// be superseded when the restarted node self-refutes to a higher incarnation.
+func (g *Gossip) MarkMemberDead(nodeID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	existing, exists := g.table.Get(nodeID)
+	if !exists {
+		// Node never gossiped — create a dead entry at incarnation 1
+		// so the death at least has a chance to propagate.
+		g.table.Set(GossipMember{
+			ID:          nodeID,
+			Address:     "",
+			State:       "dead",
+			Incarnation: 1,
+			LastSeen:    time.Now(),
+		})
+		log.Printf("[gossip] mark dead %s (new entry, inc=1)", shortID(nodeID))
+		return
+	}
+
+	g.table.Set(GossipMember{
+		ID:          existing.ID,
+		Address:     existing.Address,
+		State:       "dead",
+		Incarnation: existing.Incarnation,
+		Role:        existing.Role,
+		LastSeen:    time.Now(),
+	})
+	log.Printf("[gossip] mark dead %s (inc=%d)", shortID(nodeID), existing.Incarnation)
+}
+
+// SetOnNewNode registers the callback invoked when gossip discovers a
+// previously unknown node.
 func (g *Gossip) SetOnNewNode(fn func(node *Node)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

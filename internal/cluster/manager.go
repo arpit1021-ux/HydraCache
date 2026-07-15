@@ -269,6 +269,7 @@ func (m *Manager) handleNodeDead(nodeID string) {
 
 	if !hasReplicas {
 		_ = m.RemoveNode(nodeID)
+		m.gossip.MarkMemberDead(nodeID)
 		return
 	}
 
@@ -306,6 +307,7 @@ func (m *Manager) handleNodeDead(nodeID string) {
 
 	_ = m.topology.RemoveNode(nodeID)
 	m.registry.Unregister(nodeID)
+	m.gossip.MarkMemberDead(nodeID)
 	log.Printf("[failover] dead primary %s failover complete", shortID(nodeID))
 }
 
@@ -376,6 +378,10 @@ func (m *Manager) migrateKeys(keys []string, targetNode string) (int, error) {
 // migrateSingleKey reads a key's value and TTL from the local cache, sends
 // a SET to the target via the provided client, and on success deletes the
 // key locally. Returns an error on any failure (the caller skips and continues).
+// If the SET succeeds but the local Delete returns deleted=false (key not found
+// in local cache), this is a partial success — the key now exists on both the
+// source and target. We return an error to surface this correctness issue rather
+// than silently counting it as clean success.
 func (m *Manager) migrateSingleKey(key string, client *network.Client) error {
 	value, err := m.localCache.Get(key)
 	if err != nil {
@@ -404,8 +410,14 @@ func (m *Manager) migrateSingleKey(key string, client *network.Client) error {
 		return fmt.Errorf("unexpected SET response: %s", resp)
 	}
 
-	if _, err := m.localCache.Delete(key); err != nil {
-		log.Printf("[migrate] warning: failed to delete local key %s: %v", key, err)
+	// SET succeeded — now delete locally. If the key isn't in the local cache,
+	// that's a partial-success: the key now exists on both source and target.
+	deleted, delErr := m.localCache.Delete(key)
+	if delErr != nil {
+		return fmt.Errorf("SET succeeded but local delete error: %w (key now on both source and target)", delErr)
+	}
+	if !deleted {
+		return fmt.Errorf("SET succeeded but key not found in local cache for delete (key now on both source and target)")
 	}
 
 	return nil
