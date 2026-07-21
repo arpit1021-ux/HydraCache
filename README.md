@@ -9,8 +9,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev/)
 
-![HydraCache Banner](docs/images/banner.png)
-
 </div>
 
 ---
@@ -18,12 +16,6 @@
 HydraCache is a distributed in-memory cache built from scratch in Go. It survives node failures automatically without client downtime — no manual intervention, no data loss for in-flight requests.
 
 Designed as a systems engineering project, not a tutorial.
-
-<div align="center">
-
-![Architecture Overview](docs/images/architecture.png)
-
-</div>
 
 ---
 
@@ -153,9 +145,14 @@ hydracache/
 │   ├── pubsub/          # Publish/subscribe
 │   ├── lock/            # Distributed locking
 │   ├── metrics/         # Prometheus metrics
-│   └── simulator/       # Failure simulation
+│   ├── simulator/       # Failure simulation
+│   ├── chaostest/       # Chaos testing harness
+│   ├── config/          # Configuration management
+│   ├── logging/         # Structured logging
+│   └── utils/           # Shared utilities
 ├── dashboard/           # React monitoring UI
 ├── deploy/              # Docker and Prometheus config
+├── scripts/             # Helper scripts
 └── docs/                # Architecture and design docs
 ```
 
