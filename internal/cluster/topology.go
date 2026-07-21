@@ -177,18 +177,21 @@ func (t *Topology) notify(event TopologyEvent) {
 
 func (t *Topology) MarshalJSON() ([]byte, error) {
 	t.mu.RLock()
-	defer t.mu.RUnlock()
 	nodes := make([]*Node, 0, len(t.nodes))
 	for _, n := range t.nodes {
 		nodes = append(nodes, n)
 	}
+	epoch := t.epoch
+	updatedAt := t.updatedAt
+	t.mu.RUnlock()
+
 	return json.Marshal(struct {
 		Nodes     []*Node   `json:"nodes"`
 		Epoch     uint64    `json:"epoch"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}{
 		Nodes:     nodes,
-		Epoch:     t.epoch,
-		UpdatedAt: t.updatedAt,
+		Epoch:     epoch,
+		UpdatedAt: updatedAt,
 	})
 }
