@@ -42,9 +42,16 @@ type ClusterConfig struct {
 	SeedNodes         []string      `yaml:"seed_nodes"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	ElectionTimeout   time.Duration `yaml:"election_timeout"`
-	PhiThreshold      float64       `yaml:"phi_threshold"`
-	SuspectTimeout    time.Duration `yaml:"suspect_timeout"`
-	VirtualNodes      int           `yaml:"virtual_nodes"`
+	// ElectionLeaseTimeout is how long an elected leader keeps acting as
+	// leader after its last quorum-acknowledged heartbeat round before
+	// stepping down — the fencing mechanism that stops a partitioned-away
+	// leader from believing it holds leadership indefinitely.
+	ElectionLeaseTimeout time.Duration `yaml:"election_lease_timeout"`
+	// ElectionRPCTimeout bounds every individual vote/heartbeat RPC.
+	ElectionRPCTimeout time.Duration `yaml:"election_rpc_timeout"`
+	PhiThreshold       float64       `yaml:"phi_threshold"`
+	SuspectTimeout     time.Duration `yaml:"suspect_timeout"`
+	VirtualNodes       int           `yaml:"virtual_nodes"`
 }
 
 type WALConfig struct {
@@ -84,11 +91,13 @@ func DefaultConfig() *Config {
 			ReplicationFactor:    2,
 		},
 		Cluster: ClusterConfig{
-			HeartbeatInterval: 100 * time.Millisecond,
-			ElectionTimeout:   300 * time.Millisecond,
-			PhiThreshold:      8.0,
-			SuspectTimeout:    5 * time.Second,
-			VirtualNodes:      150,
+			HeartbeatInterval:    100 * time.Millisecond,
+			ElectionTimeout:      300 * time.Millisecond,
+			ElectionLeaseTimeout: 1 * time.Second,
+			ElectionRPCTimeout:   200 * time.Millisecond,
+			PhiThreshold:         8.0,
+			SuspectTimeout:       5 * time.Second,
+			VirtualNodes:         150,
 		},
 		WAL: WALConfig{
 			Enabled:          true,

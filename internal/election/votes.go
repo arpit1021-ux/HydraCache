@@ -1,62 +1,32 @@
 package election
 
-import (
-	"sync"
-)
-
+// VoteRequest is sent by a candidate to a peer, either as a non-binding
+// PreVote probe (PreVote=true, does not require the responder to persist
+// or mutate any state) or as a real, binding vote request.
 type VoteRequest struct {
 	CandidateID string
 	Term        uint64
+	PreVote     bool
 }
 
+// VoteResponse is a peer's answer to a VoteRequest.
 type VoteResponse struct {
 	VoterID string
 	Term    uint64
 	Granted bool
 }
 
+// HeartbeatRequest is sent by the current leader to assert its term and
+// renew its lease with followers.
 type HeartbeatRequest struct {
 	LeaderID string
 	Term     uint64
 }
 
-type VoteTracker struct {
-	mu    sync.RWMutex
-	votes map[string]map[string]VoteResponse
-}
-
-func NewVoteTracker() *VoteTracker {
-	return &VoteTracker{
-		votes: make(map[string]map[string]VoteResponse),
-	}
-}
-
-func (vt *VoteTracker) RecordVote(candidateID string, resp VoteResponse) {
-	vt.mu.Lock()
-	defer vt.mu.Unlock()
-
-	if vt.votes[candidateID] == nil {
-		vt.votes[candidateID] = make(map[string]VoteResponse)
-	}
-	vt.votes[candidateID][resp.VoterID] = resp
-}
-
-func (vt *VoteTracker) VotesFor(candidateID string) (granted, denied int) {
-	vt.mu.RLock()
-	defer vt.mu.RUnlock()
-
-	for _, resp := range vt.votes[candidateID] {
-		if resp.Granted {
-			granted++
-		} else {
-			denied++
-		}
-	}
-	return
-}
-
-func (vt *VoteTracker) Clear(term uint64) {
-	vt.mu.Lock()
-	defer vt.mu.Unlock()
-	vt.votes = make(map[string]map[string]VoteResponse)
+// HeartbeatResponse tells the leader whether the follower accepted the
+// heartbeat (Success) and, if not, the higher term the follower is
+// already aware of so the leader can step down promptly.
+type HeartbeatResponse struct {
+	Term    uint64
+	Success bool
 }

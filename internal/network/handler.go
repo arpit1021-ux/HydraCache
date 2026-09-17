@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
@@ -35,6 +36,14 @@ type Handler struct {
 	nodeID   string
 	registry *replication.ReplicaRegistry
 	locator  *hashring.Locator
+	election *election.Election
+	// epochFn returns the current topology epoch, stamped onto outgoing
+	// replication ops as the fencing token: a replica rejects an
+	// incoming op whose epoch is behind the highest it has already seen
+	// for that shard, since a strictly-increasing topology epoch means a
+	// membership/ownership change happened after the sender last knew
+	// about it (see ReplicaSet.CheckAndAdvanceEpoch).
+	epochFn func() uint64
 }
 
 // GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
@@ -62,6 +71,20 @@ func (h *Handler) SetReplication(nodeID string, registry *replication.ReplicaReg
 	h.nodeID = nodeID
 	h.registry = registry
 	h.locator = locator
+}
+
+// SetElection wires the node's Election into the command dispatch so peers
+// can send it ELECTION_VOTE / ELECTION_HEARTBEAT RPCs. Must be called
+// before the server starts accepting connections.
+func (h *Handler) SetElection(e *election.Election) {
+	h.election = e
+}
+
+// SetEpochSource wires a function returning the current topology epoch,
+// used to stamp and validate the per-shard fencing token on replicated
+// writes. Must be called before the server starts accepting connections.
+func (h *Handler) SetEpochSource(fn func() uint64) {
+	h.epochFn = fn
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {
@@ -102,6 +125,10 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 		return h.handleReplicate(cmd)
 	case "REPLICA_SYNC":
 		return h.handleReplicaSync(cmd)
+	case "ELECTION_VOTE":
+		return h.handleElectionVote(cmd)
+	case "ELECTION_HEARTBEAT":
+		return h.handleElectionHeartbeat(cmd)
 	default:
 		return &Response{err: fmt.Errorf("unknown command '%s'", cmd.Name)}
 	}
@@ -369,10 +396,15 @@ func (h *Handler) replicateWrite(cmd string, args []string) {
 		return
 	}
 
+	var epoch uint64
+	if h.epochFn != nil {
+		epoch = h.epochFn()
+	}
 	op := replication.Operation{
 		Command: cmd,
 		Args:    args,
 		NodeID:  h.nodeID,
+		Epoch:   epoch,
 	}
 	streamInfo.Stream.Append(op)
 
@@ -431,6 +463,23 @@ func (h *Handler) handleReplicate(cmd *protocol.Command) *Response {
 	var op replication.Operation
 	if err := json.Unmarshal([]byte(cmd.Args[0]), &op); err != nil {
 		return &Response{err: fmt.Errorf("REPLICATE payload parse error: %w", err)}
+	}
+
+	// Fencing: op.NodeID is the shard's primary (the node that accepted
+	// the write). If we know that shard's ReplicaSet, reject any op
+	// whose epoch is behind the highest we've already seen for it — that
+	// means a primary that lost ownership (via a topology/role change,
+	// which bumps the epoch) is still trying to replicate writes after
+	// the fact. A shard we don't know about yet is allowed through: an
+	// unknown shard can't be "stale" relative to something we've never
+	// observed, and rejecting it would just drop a legitimate first
+	// write during registry propagation.
+	if h.registry != nil {
+		if rs, ok := h.registry.GetReplicaSet(op.NodeID); ok {
+			if !rs.CheckAndAdvanceEpoch(op.Epoch) {
+				return &Response{err: fmt.Errorf("stale epoch %d for shard %s: rejected", op.Epoch, op.NodeID)}
+			}
+		}
 	}
 
 	// Apply the command to the local cache.
@@ -506,6 +555,42 @@ func (h *Handler) handleReplicaSync(cmd *protocol.Command) *Response {
 		LastSeq: latestSeq,
 	}
 	data, _ := json.Marshal(result)
+	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(data), data)}
+}
+
+// handleElectionVote processes an incoming ELECTION_VOTE RPC (pre-vote or
+// binding vote request) from a peer's Election instance.
+func (h *Handler) handleElectionVote(cmd *protocol.Command) *Response {
+	if h.election == nil {
+		return &Response{err: fmt.Errorf("election not configured")}
+	}
+	var req election.VoteRequest
+	if err := json.Unmarshal([]byte(cmd.Args[0]), &req); err != nil {
+		return &Response{err: fmt.Errorf("ELECTION_VOTE payload parse error: %w", err)}
+	}
+	resp := h.election.HandleVoteRequest(req)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return &Response{err: fmt.Errorf("ELECTION_VOTE marshal response: %w", err)}
+	}
+	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(data), data)}
+}
+
+// handleElectionHeartbeat processes an incoming ELECTION_HEARTBEAT RPC
+// from the current (claimed) leader.
+func (h *Handler) handleElectionHeartbeat(cmd *protocol.Command) *Response {
+	if h.election == nil {
+		return &Response{err: fmt.Errorf("election not configured")}
+	}
+	var req election.HeartbeatRequest
+	if err := json.Unmarshal([]byte(cmd.Args[0]), &req); err != nil {
+		return &Response{err: fmt.Errorf("ELECTION_HEARTBEAT payload parse error: %w", err)}
+	}
+	resp := h.election.HandleHeartbeat(req)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return &Response{err: fmt.Errorf("ELECTION_HEARTBEAT marshal response: %w", err)}
+	}
 	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(data), data)}
 }
 

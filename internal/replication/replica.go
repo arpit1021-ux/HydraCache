@@ -15,10 +15,11 @@ func shortID(id string) string {
 }
 
 type ReplicaSet struct {
-	mu         sync.RWMutex
-	primaryID  string
-	replicas   map[string]*ReplicaInfo
-	lagTracker *LagTracker
+	mu           sync.RWMutex
+	primaryID    string
+	replicas     map[string]*ReplicaInfo
+	lagTracker   *LagTracker
+	maxSeenEpoch atomic.Uint64
 }
 
 type ReplicaInfo struct {
@@ -164,6 +165,24 @@ func (rs *ReplicaSet) UpdateLag(nodeID string, lag int64) {
 			r.SetStatus(ReplicaLagging)
 		} else if r.GetStatus() == ReplicaLagging {
 			r.SetStatus(ReplicaActive)
+		}
+	}
+}
+
+// CheckAndAdvanceEpoch validates an incoming write's fencing epoch against
+// the highest epoch this shard has seen so far. It returns true (accept)
+// when epoch is at or ahead of the current watermark, atomically advancing
+// it; false (reject as stale) when epoch is behind — meaning the sender
+// last knew about this shard's ownership before a subsequent
+// membership/role change, i.e. it may no longer be the legitimate primary.
+func (rs *ReplicaSet) CheckAndAdvanceEpoch(epoch uint64) bool {
+	for {
+		cur := rs.maxSeenEpoch.Load()
+		if epoch < cur {
+			return false
+		}
+		if rs.maxSeenEpoch.CompareAndSwap(cur, epoch) {
+			return true
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
+	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
@@ -172,4 +173,16 @@ func (s *Server) SetGossip(g GossipHandler) {
 // before the server starts accepting connections.
 func (s *Server) SetReplication(nodeID string, registry *replication.ReplicaRegistry, locator *hashring.Locator) {
 	s.handler.SetReplication(nodeID, registry, locator)
+}
+
+// SetElection wires election RPC dispatch into the command handler. Must
+// be called before the server starts accepting connections.
+func (s *Server) SetElection(e *election.Election) {
+	s.handler.SetElection(e)
+}
+
+// SetEpochSource wires the topology-epoch fencing source into the command
+// handler. Must be called before the server starts accepting connections.
+func (s *Server) SetEpochSource(fn func() uint64) {
+	s.handler.SetEpochSource(fn)
 }

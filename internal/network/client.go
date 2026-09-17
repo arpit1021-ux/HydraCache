@@ -128,3 +128,15 @@ func (c *Client) IsConnected() bool {
 	defer c.mu.Unlock()
 	return c.connected
 }
+
+// SetDeadline bounds the next Send call's total round-trip time (both the
+// write and the read), so a peer that accepts the connection but never
+// responds cannot block the caller indefinitely.
+func (c *Client) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return c.conn.SetDeadline(t)
+}

@@ -10,6 +10,10 @@ type Operation struct {
 	Command string
 	Args    []string
 	NodeID  string
+	// Epoch is the topology epoch in effect when the primary (NodeID)
+	// accepted this write. It is the fencing token: see
+	// ReplicaSet.CheckAndAdvanceEpoch.
+	Epoch uint64
 }
 
 type ReplicationStream struct {

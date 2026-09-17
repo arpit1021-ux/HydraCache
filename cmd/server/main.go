@@ -139,13 +139,49 @@ func main() {
 	locator := hashring.NewLocator(hashRing, cfg.Cache.ReplicationFactor)
 	_ = locator
 
-	elect := election.New(cfg.Cluster.NodeID, 1)
+	electionDir := filepath.Join(cfg.WAL.Dir, "election")
+	termStore, err := election.NewFileTermStore(electionDir)
+	if err != nil {
+		log.Fatalf("Failed to init election term store: %v", err)
+	}
+	elect, err := election.New(election.Config{
+		SelfID:    cfg.Cluster.NodeID,
+		Store:     termStore,
+		Transport: network.NewElectionTransport(),
+		PeersFunc: func() []election.Peer {
+			// Deliberately uses ALL known members (not just currently
+			// reachable ones) so quorum is computed against total known
+			// cluster size — a minority partition must never be able to
+			// compute "quorum" against only the nodes it can still see.
+			nodes := topo.AllNodes()
+			peers := make([]election.Peer, 0, len(nodes))
+			for _, n := range nodes {
+				if n.ID == cfg.Cluster.NodeID || n.GetHealth() == cluster.HealthLeft {
+					continue
+				}
+				peers = append(peers, election.Peer{ID: n.ID, Address: n.Address})
+			}
+			return peers
+		},
+		ElectionTimeoutMax: cfg.Cluster.ElectionTimeout,
+		ElectionTimeoutMin: cfg.Cluster.ElectionTimeout / 2,
+		HeartbeatInterval:  cfg.Cluster.HeartbeatInterval,
+		LeaseTimeout:       cfg.Cluster.ElectionLeaseTimeout,
+		RPCTimeout:         cfg.Cluster.ElectionRPCTimeout,
+	})
+	if err != nil {
+		log.Fatalf("Failed to init election: %v", err)
+	}
 	elect.OnBecomeLeader(func() {
-		log.Printf("[main] this node is now the leader")
+		log.Printf("[main] this node is now the cluster coordinator (term %d)", elect.Term())
 		selfNode.SetRole(cluster.RoleLeader)
 		topo.SetNodeRole(cfg.Cluster.NodeID, cluster.RoleLeader)
 	})
-	elect.Start()
+	elect.OnLoseLeadership(func() {
+		log.Printf("[main] this node lost cluster coordinator status")
+		selfNode.SetRole(cluster.RolePeer)
+		topo.SetNodeRole(cfg.Cluster.NodeID, cluster.RolePeer)
+	})
 
 	// --- Snapshot timer ---
 	if snapshotter != nil && wal != nil {
@@ -193,11 +229,15 @@ func main() {
 
 	tcpServer.SetGossip(clusterMgr.Gossip())
 	tcpServer.SetReplication(cfg.Cluster.NodeID, clusterMgr.Registry(), locator)
+	tcpServer.SetElection(elect)
+	tcpServer.SetEpochSource(topo.Epoch)
 
 	if err := tcpServer.Start(ctx); err != nil {
 		log.Fatalf("Failed to start TCP server: %v", err)
 	}
 	log.Printf("[main] TCP server listening on %s", cfg.Server.Addr)
+
+	elect.Start(ctx)
 
 	// --- Bootstrap from seeds ---
 	if *join != "" {
