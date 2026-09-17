@@ -13,21 +13,23 @@ import (
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
+	"github.com/hydracache/hydracache/internal/metrics"
 	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
 	"github.com/hydracache/hydracache/internal/replication"
 )
 
 type Server struct {
-	addr      string
-	listener  net.Listener
-	cache     cache.Cache
-	maxConns  int
-	sem       chan struct{}
-	wg        sync.WaitGroup
-	connCount atomic.Int64
-	handler   *Handler
-	quit      chan struct{}
+	addr         string
+	listener     net.Listener
+	cache        cache.Cache
+	maxConns     int
+	sem          chan struct{}
+	wg           sync.WaitGroup
+	connCount    atomic.Int64
+	handler      *Handler
+	quit         chan struct{}
+	shutdownOnce sync.Once
 }
 
 type ServerConfig struct {
@@ -144,11 +146,16 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// Shutdown stops accepting connections and waits for in-flight ones to
+// finish. Safe to call more than once (e.g. an explicit Shutdown in a
+// test followed by a deferred/cleanup one) — later calls are no-ops.
 func (s *Server) Shutdown() {
-	close(s.quit)
-	if s.listener != nil {
-		s.listener.Close()
-	}
+	s.shutdownOnce.Do(func() {
+		close(s.quit)
+		if s.listener != nil {
+			s.listener.Close()
+		}
+	})
 	s.wg.Wait()
 }
 
@@ -185,4 +192,16 @@ func (s *Server) SetElection(e *election.Election) {
 // handler. Must be called before the server starts accepting connections.
 func (s *Server) SetEpochSource(fn func() uint64) {
 	s.handler.SetEpochSource(fn)
+}
+
+// SetReplicationMode configures async/sync replication. Must be called
+// before the server starts accepting connections.
+func (s *Server) SetReplicationMode(mode string, ackCount int, syncTimeout time.Duration) {
+	s.handler.SetReplicationMode(mode, ackCount, syncTimeout)
+}
+
+// SetMetricsCollector wires a metrics.Collector so replication lag
+// observed from real replica acks is exported on /metrics.
+func (s *Server) SetMetricsCollector(c *metrics.Collector) {
+	s.handler.SetMetricsCollector(c)
 }

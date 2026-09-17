@@ -34,6 +34,20 @@ type CacheConfig struct {
 	ExpirationInterval   time.Duration `yaml:"expiration_interval"`
 	ExpirationSampleSize int           `yaml:"expiration_sample_size"`
 	ReplicationFactor    int           `yaml:"replication_factor"`
+
+	// ReplicationMode is "async" (default: return to the client as soon
+	// as the local write is durable) or "sync" (block for ReplicationAckCount
+	// replica acks, bounded by ReplicationSyncTimeout).
+	ReplicationMode        string        `yaml:"replication_mode"`
+	ReplicationAckCount    int           `yaml:"replication_ack_count"`
+	ReplicationSyncTimeout time.Duration `yaml:"replication_sync_timeout"`
+
+	// MaxPromotionLag and PromotionGateTimeout bound failover promotion:
+	// a dead primary's replica is only promoted once its lag is at or
+	// below MaxPromotionLag, waiting up to PromotionGateTimeout before
+	// promoting the best available candidate anyway.
+	MaxPromotionLag      int64         `yaml:"max_promotion_lag"`
+	PromotionGateTimeout time.Duration `yaml:"promotion_gate_timeout"`
 }
 
 type ClusterConfig struct {
@@ -83,12 +97,17 @@ func DefaultConfig() *Config {
 			WriteTimeout: 30 * time.Second,
 		},
 		Cache: CacheConfig{
-			EvictionPolicy:       "lru",
-			EvictionCapacity:     100000,
-			ActiveExpiration:     true,
-			ExpirationInterval:   time.Second,
-			ExpirationSampleSize: 10,
-			ReplicationFactor:    2,
+			EvictionPolicy:         "lru",
+			EvictionCapacity:       100000,
+			ActiveExpiration:       true,
+			ExpirationInterval:     time.Second,
+			ExpirationSampleSize:   10,
+			ReplicationFactor:      2,
+			ReplicationMode:        "async",
+			ReplicationAckCount:    1,
+			ReplicationSyncTimeout: 2 * time.Second,
+			MaxPromotionLag:        100,
+			PromotionGateTimeout:   5 * time.Second,
 		},
 		Cluster: ClusterConfig{
 			HeartbeatInterval:    100 * time.Millisecond,

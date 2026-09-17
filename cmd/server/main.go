@@ -231,6 +231,10 @@ func main() {
 	tcpServer.SetReplication(cfg.Cluster.NodeID, clusterMgr.Registry(), locator)
 	tcpServer.SetElection(elect)
 	tcpServer.SetEpochSource(topo.Epoch)
+	tcpServer.SetReplicationMode(cfg.Cache.ReplicationMode, cfg.Cache.ReplicationAckCount, cfg.Cache.ReplicationSyncTimeout)
+	tcpServer.SetMetricsCollector(collector)
+
+	clusterMgr.SetPromotionGate(cfg.Cache.MaxPromotionLag, cfg.Cache.PromotionGateTimeout)
 
 	if err := tcpServer.Start(ctx); err != nil {
 		log.Fatalf("Failed to start TCP server: %v", err)

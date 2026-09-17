@@ -1,20 +1,33 @@
 package network
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"strings"
 	"time"
 
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
+	"github.com/hydracache/hydracache/internal/metrics"
 	"github.com/hydracache/hydracache/internal/persistence"
 	"github.com/hydracache/hydracache/internal/protocol"
 	"github.com/hydracache/hydracache/internal/replication"
+)
+
+// Replication modes, set via SetReplicationMode. ModeAsync (the default)
+// returns to the client as soon as the local write is durable, fanning
+// out to replicas in the background. ModeSync blocks the client response
+// until at least AckCount replicas confirm the write or SyncTimeout
+// elapses — matching Redis's WAIT semantics: the local write has already
+// happened either way, sync mode only reports whether it was
+// sufficiently replicated, since there is no safe way to "undo" a write
+// concurrent readers may have already observed.
+const (
+	ReplicationModeAsync = "async"
+	ReplicationModeSync  = "sync"
 )
 
 type Response struct {
@@ -44,6 +57,11 @@ type Handler struct {
 	// membership/ownership change happened after the sender last knew
 	// about it (see ReplicaSet.CheckAndAdvanceEpoch).
 	epochFn func() uint64
+
+	replicationMode  string // ReplicationModeAsync (default) or ReplicationModeSync
+	ackCount         int
+	syncTimeout      time.Duration
+	metricsCollector *metrics.Collector
 }
 
 // GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
@@ -85,6 +103,24 @@ func (h *Handler) SetElection(e *election.Election) {
 // writes. Must be called before the server starts accepting connections.
 func (h *Handler) SetEpochSource(fn func() uint64) {
 	h.epochFn = fn
+}
+
+// SetReplicationMode configures whether writes wait for replica
+// acknowledgment. mode must be ReplicationModeAsync (default if never
+// called) or ReplicationModeSync; ackCount is how many replicas must ack
+// in sync mode (capped to however many active replicas actually exist);
+// syncTimeout bounds how long a sync write waits before failing.
+func (h *Handler) SetReplicationMode(mode string, ackCount int, syncTimeout time.Duration) {
+	h.replicationMode = mode
+	h.ackCount = ackCount
+	h.syncTimeout = syncTimeout
+}
+
+// SetMetricsCollector wires a metrics.Collector so real replication lag
+// observed from replica acks is exported on /metrics instead of the
+// counter sitting permanently at zero.
+func (h *Handler) SetMetricsCollector(c *metrics.Collector) {
+	h.metricsCollector = c
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {
@@ -182,7 +218,9 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 			_, _ = h.cache.Delete(key)
 			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 		}
-		h.replicateWrite(cmd.Name, cmd.Args)
+		if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+			return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		}
 		return &Response{data: []byte("+OK\r\n")}
 	}
 
@@ -205,7 +243,9 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 			}
 			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 		}
-		h.replicateWrite(cmd.Name, cmd.Args)
+		if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+			return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		}
 		return &Response{data: []byte("+OK\r\n")}
 	}
 
@@ -216,7 +256,9 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 	if err := h.cache.Set(key, val, ttl); err != nil {
 		return &Response{err: err}
 	}
-	h.replicateWrite(cmd.Name, cmd.Args)
+	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+	}
 	return &Response{data: []byte("+OK\r\n")}
 }
 
@@ -241,7 +283,9 @@ func (h *Handler) handleDel(cmd *protocol.Command) *Response {
 			count++
 		}
 	}
-	h.replicateWrite(cmd.Name, cmd.Args)
+	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+	}
 	return &Response{data: fmt.Appendf(nil, ":%d\r\n", count)}
 }
 
@@ -291,7 +335,9 @@ func (h *Handler) handleExpire(cmd *protocol.Command) *Response {
 	if err := h.cache.Expire(cmd.Args[0], time.Duration(seconds)*time.Second); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
-	h.replicateWrite(cmd.Name, cmd.Args)
+	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+	}
 	return &Response{data: []byte(":1\r\n")}
 }
 
@@ -303,7 +349,9 @@ func (h *Handler) handlePersist(cmd *protocol.Command) *Response {
 	if err := h.cache.Persist(cmd.Args[0]); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
-	h.replicateWrite(cmd.Name, cmd.Args)
+	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+	}
 	return &Response{data: []byte(":1\r\n")}
 }
 
@@ -372,89 +420,205 @@ func (h *Handler) handleGossip(cmd *protocol.Command) *Response {
 	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(resp), resp)}
 }
 
-// replicateWrite appends an operation to the primary's ReplicationStream and
-// fires async REPLICATE commands to all replica nodes. Called after a
-// successful write (WAL append + cache mutation). Best-effort: replication
-// failures are logged but do not affect the client response.
-func (h *Handler) replicateWrite(cmd string, args []string) {
-	if h.registry == nil || h.locator == nil {
-		return
+// replicateWrite appends an operation to the primary's ReplicationStream
+// and fans it out to replicas. In ReplicationModeAsync (default) it
+// queues the fan-out and returns nil immediately regardless of outcome —
+// the client's write is already durable locally. In ReplicationModeSync
+// it blocks (bounded by h.syncTimeout) until at least h.ackCount replicas
+// confirm the write, returning an error if that bound isn't met: the
+// caller surfaces that as "applied locally but under-replicated" rather
+// than a clean OK, since the local mutation has already happened and
+// cannot be safely rolled back once other readers may have observed it.
+//
+// Commands with no key argument (e.g. FLUSHALL) aren't associated with a
+// single shard's primary, so they are not replicated by this path; a
+// cluster-wide broadcast for such commands is a separate, not-yet-built
+// mechanism.
+func (h *Handler) replicateWrite(cmd string, args []string) error {
+	if h.registry == nil || h.locator == nil || len(args) == 0 {
+		return nil
 	}
 
 	primary := h.locator.PrimaryNode(args[0])
 	if primary != h.nodeID {
-		return // not the primary for this key
+		return nil // not the primary for this key
 	}
 
 	rs, ok := h.registry.GetReplicaSet(primary)
 	if !ok {
-		return
+		return nil
 	}
 
 	streamInfo, ok := rs.GetReplica(primary)
 	if !ok || streamInfo == nil || streamInfo.Stream == nil {
-		return
+		return nil
 	}
 
 	var epoch uint64
 	if h.epochFn != nil {
 		epoch = h.epochFn()
 	}
-	op := replication.Operation{
-		Command: cmd,
-		Args:    args,
-		NodeID:  h.nodeID,
-		Epoch:   epoch,
-	}
-	streamInfo.Stream.Append(op)
+	op := replication.Operation{Command: cmd, Args: args, NodeID: h.nodeID, Epoch: epoch}
+	op.Seq = streamInfo.Stream.Append(op)
 
-	// Fan out to replicas asynchronously.
-	for _, replica := range rs.ActiveReplicas() {
-		if replica.NodeID == h.nodeID {
+	targets := rs.ActiveReplicas()
+
+	if h.replicationMode == ReplicationModeSync {
+		return h.replicateSync(rs, op, targets, streamInfo.Stream)
+	}
+	h.replicateAsync(rs, op, targets, streamInfo.Stream)
+	return nil
+}
+
+// replicateAsync fires the op at every active replica in the background
+// and, on a successful ack, records real lag (how far the replica's
+// confirmed seq trails the stream's current tip). Every spawned goroutine
+// exits on its own within sendReplicateOne's bounded timeout — never
+// blocking the caller and never left running indefinitely.
+func (h *Handler) replicateAsync(rs *replication.ReplicaSet, op replication.Operation, targets []*replication.ReplicaInfo, stream *replication.ReplicationStream) {
+	for _, r := range targets {
+		if r.NodeID == h.nodeID || r.Address == "" {
 			continue
 		}
-		addr := replica.Address
-		if addr == "" {
-			continue
-		}
-		go h.sendReplicate(addr, op)
+		r := r
+		go func() {
+			if err := h.sendReplicateOne(r.Address, op, 5*time.Second); err != nil {
+				log.Printf("[replication] async replicate to %s failed: %v", shortAddr(r.Address), err)
+				return
+			}
+			h.recordAck(rs, r.NodeID, stream.LatestSeq()-op.Seq)
+		}()
 	}
 }
 
-// sendReplicate sends a REPLICATE command to a single replica over TCP.
-// Best-effort: errors are logged but not propagated.
-func (h *Handler) sendReplicate(addr string, op replication.Operation) {
+// replicateSync fans the op out to every active replica concurrently and
+// waits (bounded by h.syncTimeout) for at least h.ackCount of them to
+// confirm. ackCount is capped to however many replicas actually exist —
+// it can never demand more acks than there are replicas to give them.
+func (h *Handler) replicateSync(rs *replication.ReplicaSet, op replication.Operation, targets []*replication.ReplicaInfo, stream *replication.ReplicationStream) error {
+	timeout := h.syncTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	type result struct {
+		err    error
+		nodeID string
+	}
+	results := make(chan result, len(targets))
+	spawned := 0
+	for _, r := range targets {
+		if r.NodeID == h.nodeID || r.Address == "" {
+			continue
+		}
+		spawned++
+		r := r
+		go func() {
+			err := h.sendReplicateOneCtx(ctx, r.Address, op)
+			results <- result{err: err, nodeID: r.NodeID}
+		}()
+	}
+
+	need := h.ackCount
+	if need > spawned {
+		need = spawned
+	}
+	if need <= 0 {
+		return nil
+	}
+
+	acked := 0
+	for i := 0; i < spawned; i++ {
+		select {
+		case res := <-results:
+			if res.err != nil {
+				log.Printf("[replication] sync replicate to %s failed: %v", shortID(res.nodeID), res.err)
+				continue
+			}
+			acked++
+			h.recordAck(rs, res.nodeID, stream.LatestSeq()-op.Seq)
+			if acked >= need {
+				return nil
+			}
+		case <-ctx.Done():
+			return fmt.Errorf("sync replication timed out after %v: %d/%d required replicas acked", timeout, acked, need)
+		}
+	}
+	return fmt.Errorf("sync replication failed: %d/%d required replicas acked", acked, need)
+}
+
+// recordAck updates a replica's tracked lag and, if a metrics collector is
+// wired, exports it so it stops sitting permanently at zero on /metrics.
+func (h *Handler) recordAck(rs *replication.ReplicaSet, nodeID string, lag int64) {
+	if lag < 0 {
+		lag = 0
+	}
+	rs.UpdateLag(nodeID, lag)
+	if h.metricsCollector != nil {
+		h.metricsCollector.SetReplicationLag(nodeID, lag)
+	}
+}
+
+// sendReplicateOne sends one REPLICATE command to a replica and waits for
+// its reply, bounded by timeout — the previous implementation never read
+// the reply at all, so a "successful" replicate was never actually
+// confirmed.
+func (h *Handler) sendReplicateOne(addr string, op replication.Operation, timeout time.Duration) error {
 	payload, err := json.Marshal(op)
 	if err != nil {
-		log.Printf("[replication] marshal error: %v", err)
-		return
+		return fmt.Errorf("marshal replication op: %w", err)
 	}
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	client := NewClientWithTimeout(addr, timeout)
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set deadline for %s: %w", addr, err)
+	}
+	resp, err := client.Send("REPLICATE", string(payload))
 	if err != nil {
-		log.Printf("[replication] connect to %s failed: %v", shortAddr(addr), err)
-		return
+		return fmt.Errorf("REPLICATE to %s: %w", addr, err)
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	w := bufio.NewWriter(conn)
-	encoder := protocol.NewEncoder(w)
-	if err := encoder.WriteArrayLen(2); err != nil {
-		log.Printf("[replication] send to %s failed: %v", shortAddr(addr), err)
-		return
+	if resp != "OK" {
+		return fmt.Errorf("unexpected REPLICATE response from %s: %s", addr, resp)
 	}
-	if err := encoder.WriteBulkStringRaw("REPLICATE"); err != nil {
-		log.Printf("[replication] send to %s failed: %v", shortAddr(addr), err)
-		return
-	}
-	if err := encoder.WriteBulkStringRaw(string(payload)); err != nil {
-		log.Printf("[replication] send to %s failed: %v", shortAddr(addr), err)
-		return
-	}
-	_ = w.Flush()
+	return nil
 }
 
-// handleReplicate processes an incoming REPLICATE command from the primary.
-// The payload is a JSON-encoded replication.Operation.
+// sendReplicateOneCtx bounds sendReplicateOne by ctx's deadline instead of
+// a fixed timeout, so a synchronous replication round respects the
+// overall sync timeout rather than each RPC getting its own separate one.
+func (h *Handler) sendReplicateOneCtx(ctx context.Context, addr string, op replication.Operation) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(2 * time.Second)
+	}
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		return ctx.Err()
+	}
+	return h.sendReplicateOne(addr, op, timeout)
+}
+
+// handleReplicate processes an incoming REPLICATE command from the
+// primary. The payload is a JSON-encoded replication.Operation.
+//
+// op.NodeID identifies the shard (the primary that accepted the write).
+// If this node tracks that shard's ReplicaSet, three checks run before
+// the op is applied, all serialized under the shard's apply lock so two
+// concurrently-arriving ops for the same shard (each opens its own
+// connection, so the wire gives no ordering guarantee) can never race:
+//  1. Epoch fencing — reject if op.Epoch is behind the highest seen for
+//     this shard (see ReplicaSet.CheckAndAdvanceEpoch).
+//  2. Staleness — if a later-or-equal seq has already been applied, this
+//     op arrived late/out of order; applying it now would risk
+//     clobbering a newer value with stale data, so it's dropped as OK.
+//  3. Gap detection — if op.Seq skips ahead of what's been applied, pull
+//     and apply the missing ops from the primary via REPLICA_SYNC before
+//     applying this one.
 func (h *Handler) handleReplicate(cmd *protocol.Command) *Response {
 	if len(cmd.Args) == 0 {
 		return &Response{err: fmt.Errorf("REPLICATE requires a JSON payload")}
@@ -465,30 +629,112 @@ func (h *Handler) handleReplicate(cmd *protocol.Command) *Response {
 		return &Response{err: fmt.Errorf("REPLICATE payload parse error: %w", err)}
 	}
 
-	// Fencing: op.NodeID is the shard's primary (the node that accepted
-	// the write). If we know that shard's ReplicaSet, reject any op
-	// whose epoch is behind the highest we've already seen for it — that
-	// means a primary that lost ownership (via a topology/role change,
-	// which bumps the epoch) is still trying to replicate writes after
-	// the fact. A shard we don't know about yet is allowed through: an
-	// unknown shard can't be "stale" relative to something we've never
-	// observed, and rejecting it would just drop a legitimate first
-	// write during registry propagation.
+	var rs *replication.ReplicaSet
 	if h.registry != nil {
-		if rs, ok := h.registry.GetReplicaSet(op.NodeID); ok {
-			if !rs.CheckAndAdvanceEpoch(op.Epoch) {
-				return &Response{err: fmt.Errorf("stale epoch %d for shard %s: rejected", op.Epoch, op.NodeID)}
-			}
+		rs, _ = h.registry.GetReplicaSet(op.NodeID)
+	}
+
+	// A shard we don't know about yet, or an unsequenced op (Seq<=0, e.g.
+	// from a hand-built test), skips staleness/gap tracking entirely —
+	// there's nothing to compare against yet.
+	if rs == nil || op.Seq <= 0 {
+		if rs != nil && !rs.CheckAndAdvanceEpoch(op.Epoch) {
+			return &Response{err: fmt.Errorf("stale epoch %d for shard %s: rejected", op.Epoch, op.NodeID)}
+		}
+		return h.applyOp(op)
+	}
+
+	unlock := rs.LockApply()
+	defer unlock()
+
+	if !rs.CheckAndAdvanceEpoch(op.Epoch) {
+		return &Response{err: fmt.Errorf("stale epoch %d for shard %s: rejected", op.Epoch, op.NodeID)}
+	}
+
+	last := rs.LastAppliedSeq()
+	if last > 0 && op.Seq <= last {
+		return &Response{data: []byte("+OK\r\n")} // stale/duplicate: already superseded
+	}
+	if last > 0 && op.Seq > last+1 {
+		if err := h.catchUpGapLocked(rs, op.NodeID, last); err != nil {
+			log.Printf("[replication] gap catch-up for shard %s failed (have=%d want=%d): %v",
+				shortID(op.NodeID), last, op.Seq, err)
 		}
 	}
 
-	// Apply the command to the local cache.
+	resp := h.applyOp(op)
+	if resp.err == nil {
+		rs.SetLastAppliedSeq(op.Seq)
+	}
+	return resp
+}
+
+// applyOp applies a single replicated operation to the local cache. It
+// does not touch shard bookkeeping (epoch/seq) — callers own that, since
+// catch-up ops need to be applied without re-entering handleReplicate's
+// (non-reentrant) apply lock.
+func (h *Handler) applyOp(op replication.Operation) *Response {
 	innerCmd := &protocol.Command{Name: op.Command, Args: op.Args}
 	resp := h.Handle(innerCmd)
 	if resp.err != nil {
 		return resp
 	}
 	return &Response{data: []byte("+OK\r\n")}
+}
+
+// catchUpGapLocked pulls missing ops for a shard from its primary via
+// REPLICA_SYNC and applies them in order. The caller must already hold
+// rs's apply lock (see ReplicaSet.LockApply), and must NOT route these
+// ops back through handleReplicate — that would try to re-acquire the
+// same lock and deadlock.
+func (h *Handler) catchUpGapLocked(rs *replication.ReplicaSet, primaryID string, lastApplied int64) error {
+	primaryInfo, ok := rs.GetReplica(primaryID)
+	if !ok || primaryInfo == nil || primaryInfo.Address == "" {
+		return fmt.Errorf("no address known for primary %s", primaryID)
+	}
+
+	const timeout = 2 * time.Second
+	client := NewClientWithTimeout(primaryInfo.Address, timeout)
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("connect to primary %s: %w", shortAddr(primaryInfo.Address), err)
+	}
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
+	}
+
+	raw, err := client.Send("REPLICA_SYNC", fmt.Sprintf("%d", lastApplied))
+	if err != nil {
+		return fmt.Errorf("REPLICA_SYNC request: %w", err)
+	}
+
+	var result SyncResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return fmt.Errorf("REPLICA_SYNC response parse: %w", err)
+	}
+	if result.Status == "FULL_SYNC" {
+		return fmt.Errorf("gap exceeds retention buffer: full sync required (not performed by gap catch-up)")
+	}
+
+	applied := 0
+	for _, catchupOp := range result.Ops {
+		if catchupOp.Seq <= rs.LastAppliedSeq() {
+			continue
+		}
+		if !rs.CheckAndAdvanceEpoch(catchupOp.Epoch) {
+			log.Printf("[replication] catch-up op seq=%d for shard %s rejected: stale epoch %d",
+				catchupOp.Seq, shortID(primaryID), catchupOp.Epoch)
+			continue
+		}
+		if resp := h.applyOp(catchupOp); resp.err != nil {
+			return fmt.Errorf("apply catch-up op seq=%d: %w", catchupOp.Seq, resp.err)
+		}
+		rs.SetLastAppliedSeq(catchupOp.Seq)
+		applied++
+	}
+	log.Printf("[replication] shard %s caught up %d/%d gap op(s), now at seq %d",
+		shortID(primaryID), applied, len(result.Ops), rs.LastAppliedSeq())
+	return nil
 }
 
 // SyncResult is returned by handleReplicaSync.
@@ -592,6 +838,13 @@ func (h *Handler) handleElectionHeartbeat(cmd *protocol.Command) *Response {
 		return &Response{err: fmt.Errorf("ELECTION_HEARTBEAT marshal response: %w", err)}
 	}
 	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(data), data)}
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func shortAddr(addr string) string {

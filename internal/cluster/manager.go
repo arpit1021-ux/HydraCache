@@ -38,17 +38,24 @@ type Manager struct {
 	syncing    map[string]struct{} // replica nodeIDs with in-flight sync
 	stopCh     chan struct{}
 	wg         sync.WaitGroup
+
+	// maxPromotionLag and promotionGateTimeout bound failover promotion:
+	// see handleNodeDead and replication.Promotion.PromoteBestReplicaFromWithGate.
+	maxPromotionLag      int64
+	promotionGateTimeout time.Duration
 }
 
 func NewManager(selfNode *Node, topo *Topology, ring *hashring.HashRing, localCache cache.Cache) *Manager {
 	m := &Manager{
-		topology:   topo,
-		selfNode:   selfNode,
-		ring:       ring,
-		localCache: localCache,
-		registry:   replication.NewReplicaRegistry(),
-		syncing:    make(map[string]struct{}),
-		stopCh:     make(chan struct{}),
+		topology:             topo,
+		selfNode:             selfNode,
+		ring:                 ring,
+		localCache:           localCache,
+		registry:             replication.NewReplicaRegistry(),
+		syncing:              make(map[string]struct{}),
+		stopCh:               make(chan struct{}),
+		maxPromotionLag:      100,
+		promotionGateTimeout: 5 * time.Second,
 	}
 	m.rebalancer = hashring.NewRebalancer(ring, m.migrateKeys)
 	m.gossip = NewGossip(selfNode, topo)
@@ -133,6 +140,17 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	log.Printf("[cluster] node %s started at %s", shortID(m.selfNode.ID), m.selfNode.Address)
 	return nil
+}
+
+// SetPromotionGate configures the failover promotion gate: a dead
+// primary's ring-successor replica is only promoted once its replication
+// lag is at or below maxLag, waiting up to gateTimeout before promoting
+// the best available candidate anyway (see handleNodeDead).
+func (m *Manager) SetPromotionGate(maxLag int64, gateTimeout time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxPromotionLag = maxLag
+	m.promotionGateTimeout = gateTimeout
 }
 
 func (m *Manager) Bootstrap(addresses []string) error {
@@ -283,7 +301,20 @@ func (m *Manager) handleNodeDead(nodeID string) {
 	var promotedNode string
 	var promoErr error
 	if promo != nil && succ != "" {
-		promotedNode, promoErr = promo.PromoteBestReplicaFrom(succ)
+		m.mu.RLock()
+		maxLag := m.maxPromotionLag
+		gateTimeout := m.promotionGateTimeout
+		m.mu.RUnlock()
+
+		gateCtx, cancel := context.WithTimeout(context.Background(), gateTimeout)
+		var lossy bool
+		promotedNode, lossy, promoErr = promo.PromoteBestReplicaFromWithGate(gateCtx, succ, maxLag, 100*time.Millisecond)
+		cancel()
+		if lossy {
+			log.Printf("[failover] WARNING: promotion gate for dead primary %s timed out after %v — "+
+				"promoted %s at lag above %d anyway; replicated writes may be lost",
+				shortID(nodeID), gateTimeout, shortID(promotedNode), maxLag)
+		}
 	}
 	if promotedNode == "" && promo != nil {
 		// Fallback: no ring-successor match, promote lowest-lag overall

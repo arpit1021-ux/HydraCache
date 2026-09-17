@@ -20,6 +20,14 @@ type ReplicaSet struct {
 	replicas     map[string]*ReplicaInfo
 	lagTracker   *LagTracker
 	maxSeenEpoch atomic.Uint64
+
+	// applyMu serializes gap-detection + catch-up + apply for this shard
+	// on a receiving replica, so two concurrently-arriving REPLICATE ops
+	// for the same shard (each op opens its own connection, so the wire
+	// gives no ordering guarantee) can never race on lastAppliedSeq or
+	// trigger duplicate concurrent catch-ups.
+	applyMu        sync.Mutex
+	lastAppliedSeq atomic.Int64
 }
 
 type ReplicaInfo struct {
@@ -183,6 +191,37 @@ func (rs *ReplicaSet) CheckAndAdvanceEpoch(epoch uint64) bool {
 		}
 		if rs.maxSeenEpoch.CompareAndSwap(cur, epoch) {
 			return true
+		}
+	}
+}
+
+// LockApply acquires the shard's apply lock and returns the unlock
+// function. Hold it across gap-detection, catch-up, and application of a
+// single incoming REPLICATE op so concurrent arrivals for this shard are
+// serialized end to end.
+func (rs *ReplicaSet) LockApply() func() {
+	rs.applyMu.Lock()
+	return rs.applyMu.Unlock
+}
+
+// LastAppliedSeq returns the highest op sequence number this node has
+// applied for this shard (0 if none yet, or if this node has never
+// tracked sequencing for it).
+func (rs *ReplicaSet) LastAppliedSeq() int64 {
+	return rs.lastAppliedSeq.Load()
+}
+
+// SetLastAppliedSeq advances the applied-seq watermark. Monotonic: a
+// lower or equal value is a no-op, so late-arriving stale updates can
+// never move it backwards.
+func (rs *ReplicaSet) SetLastAppliedSeq(seq int64) {
+	for {
+		cur := rs.lastAppliedSeq.Load()
+		if seq <= cur {
+			return
+		}
+		if rs.lastAppliedSeq.CompareAndSwap(cur, seq) {
+			return
 		}
 	}
 }
