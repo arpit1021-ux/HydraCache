@@ -401,6 +401,9 @@ func (m *Manager) migrateKeys(keys []string, targetNode string) (int, error) {
 			log.Printf("[migrate] key=%s → %s failed: %v", key, shortID(targetNode), err)
 			continue
 		}
+		if m.rebalancer != nil {
+			m.rebalancer.MarkKeyMigrated(key, targetNode)
+		}
 		migrated++
 	}
 	return migrated, nil
@@ -408,11 +411,15 @@ func (m *Manager) migrateKeys(keys []string, targetNode string) (int, error) {
 
 // migrateSingleKey reads a key's value and TTL from the local cache, sends
 // a SET to the target via the provided client, and on success deletes the
-// key locally. Returns an error on any failure (the caller skips and continues).
-// If the SET succeeds but the local Delete returns deleted=false (key not found
-// in local cache), this is a partial success — the key now exists on both the
-// source and target. We return an error to surface this correctness issue rather
-// than silently counting it as clean success.
+// key locally — but only if the local value is still exactly what was
+// copied (CompareAndDelete). Without that guard, a client write landing
+// between the initial Get and the Delete (including the network
+// round-trip to the target in between) would be silently destroyed: the
+// target only ever received the OLD value, and a plain Delete would then
+// erase the NEW one with nothing left holding it. When the guard trips,
+// the key is deliberately left on the source (not deleted) — a temporary
+// duplicate with the source still authoritative is a far safer failure
+// mode than data loss, and a later rebalance pass retries the key.
 func (m *Manager) migrateSingleKey(key string, client *network.Client) error {
 	value, err := m.localCache.Get(key)
 	if err != nil {
@@ -441,14 +448,12 @@ func (m *Manager) migrateSingleKey(key string, client *network.Client) error {
 		return fmt.Errorf("unexpected SET response: %s", resp)
 	}
 
-	// SET succeeded — now delete locally. If the key isn't in the local cache,
-	// that's a partial-success: the key now exists on both source and target.
-	deleted, delErr := m.localCache.Delete(key)
+	deleted, delErr := m.localCache.CompareAndDelete(key, value)
 	if delErr != nil {
-		return fmt.Errorf("SET succeeded but local delete error: %w (key now on both source and target)", delErr)
+		return fmt.Errorf("SET succeeded but local compare-and-delete error: %w (key now on both source and target)", delErr)
 	}
 	if !deleted {
-		return fmt.Errorf("SET succeeded but key not found in local cache for delete (key now on both source and target)")
+		return fmt.Errorf("value changed during migration (concurrent write) — key kept on source, not deleted, will retry")
 	}
 
 	return nil
@@ -469,6 +474,22 @@ func (m *Manager) PromoteReplica(replicaID string) error {
 	m.topology.SetNodeRole(replicaID, RoleLeader)
 	log.Printf("[cluster] promoted %s to leader", shortID(replicaID))
 	return nil
+}
+
+// RedirectTarget implements network.MigrationChecker: it reports the
+// address to forward a request to when the given key was migrated away
+// from this node to another one within the redirect TTL (see
+// hashring.Rebalancer.RedirectTarget).
+func (m *Manager) RedirectTarget(key string) (string, bool) {
+	nodeID, ok := m.rebalancer.RedirectTarget(key)
+	if !ok {
+		return "", false
+	}
+	node, ok := m.topology.GetNode(nodeID)
+	if !ok {
+		return "", false
+	}
+	return node.Address, true
 }
 
 func (m *Manager) Self() *Node {

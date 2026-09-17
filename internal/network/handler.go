@@ -62,11 +62,20 @@ type Handler struct {
 	ackCount         int
 	syncTimeout      time.Duration
 	metricsCollector *metrics.Collector
+	migration        MigrationChecker
 }
 
 // GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
 type GossipHandler interface {
 	HandleGossip(payload string) (string, error)
+}
+
+// MigrationChecker reports whether a key was migrated away from this node
+// to another one recently enough that a local miss should be redirected
+// there instead of reported as a genuine miss — protecting a client whose
+// routing view hasn't caught up with the latest topology change yet.
+type MigrationChecker interface {
+	RedirectTarget(key string) (addr string, ok bool)
 }
 
 func NewHandler(c cache.Cache) *Handler {
@@ -121,6 +130,13 @@ func (h *Handler) SetReplicationMode(mode string, ackCount int, syncTimeout time
 // counter sitting permanently at zero.
 func (h *Handler) SetMetricsCollector(c *metrics.Collector) {
 	h.metricsCollector = c
+}
+
+// SetMigrationChecker wires in-flight-migration redirect support: a local
+// GET miss for a key this node recently migrated away is forwarded to its
+// new owner instead of being reported as a genuine miss.
+func (h *Handler) SetMigrationChecker(mc MigrationChecker) {
+	h.migration = mc
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {
@@ -263,11 +279,55 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 }
 
 func (h *Handler) handleGet(cmd *protocol.Command) *Response {
-	val, err := h.cache.Get(cmd.Args[0])
-	if err != nil {
-		return &Response{data: []byte("$-1\r\n")}
+	key := cmd.Args[0]
+	val, err := h.cache.Get(key)
+	if err == nil {
+		return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(val), val)}
 	}
-	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(val), val)}
+
+	// Local miss — if this key was migrated away to another node recently,
+	// forward the request there instead of reporting a false miss for
+	// data that has simply moved.
+	if h.migration != nil {
+		if addr, ok := h.migration.RedirectTarget(key); ok {
+			if fv, ferr := h.forwardGet(addr, key); ferr == nil {
+				return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(fv), fv)}
+			}
+		}
+	}
+	return &Response{data: []byte("$-1\r\n")}
+}
+
+// forwardGet issues a GET against another node on behalf of a client that
+// reached this node for a key that has since moved elsewhere. Bounded by
+// a short timeout so a redirect never turns into an unbounded hang.
+//
+// Known limitation: Client.Send cannot distinguish a genuine nil (RESP
+// "$-1") from an empty-string value — both come back as "". A forwarded
+// GET for a key whose real value happens to be empty will therefore be
+// reported as a miss rather than an empty string. This pre-existing
+// ambiguity in Client's reply parsing is not introduced by forwarding;
+// it's accepted here rather than reworked, since the case it affects
+// (an empty-string cached value, during the redirect TTL window after a
+// migration) is narrow.
+func (h *Handler) forwardGet(addr, key string) ([]byte, error) {
+	const timeout = 500 * time.Millisecond
+	client := NewClientWithTimeout(addr, timeout)
+	if err := client.Connect(); err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("set deadline for %s: %w", addr, err)
+	}
+	resp, err := client.Send("GET", key)
+	if err != nil {
+		return nil, fmt.Errorf("forwarded GET to %s: %w", addr, err)
+	}
+	if resp == "" {
+		return nil, fmt.Errorf("forwarded GET to %s: empty/miss response", addr)
+	}
+	return []byte(resp), nil
 }
 
 func (h *Handler) handleDel(cmd *protocol.Command) *Response {

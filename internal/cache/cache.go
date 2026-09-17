@@ -13,6 +13,11 @@ type Cache interface {
 	SetXX(key string, value []byte, ttl time.Duration) bool
 	Get(key string) ([]byte, error)
 	Delete(key string) (bool, error)
+	// CompareAndDelete atomically deletes key only if its current value
+	// equals expected, so a caller (e.g. migration) can safely remove a
+	// key it copied elsewhere without racing a concurrent write that
+	// landed after the copy but before the delete.
+	CompareAndDelete(key string, expected []byte) (bool, error)
 	Exists(key string) (bool, error)
 	TTL(key string) (time.Duration, error)
 	Expire(key string, ttl time.Duration) error
@@ -103,6 +108,10 @@ func (c *LocalCache) Get(key string) ([]byte, error) {
 func (c *LocalCache) Delete(key string) (bool, error) {
 	deleted := c.store.Delete(key)
 	return deleted, nil
+}
+
+func (c *LocalCache) CompareAndDelete(key string, expected []byte) (bool, error) {
+	return c.store.CompareAndDelete(key, expected), nil
 }
 
 func (c *LocalCache) Exists(key string) (bool, error) {

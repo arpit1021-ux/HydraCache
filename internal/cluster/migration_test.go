@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/hashring"
 	"github.com/hydracache/hydracache/internal/network"
 )
@@ -267,11 +268,22 @@ func TestSingleConnectionPerRebalance(t *testing.T) {
 	}
 }
 
+// TestDeadTargetMidRebalance proves keys aren't lost when the target dies
+// partway through a migration batch. It deliberately does NOT try to race
+// a real background rebalance goroutine against a timed kill: on loopback,
+// a batch of hundreds of keys can finish in well under a millisecond, so
+// any "wait for N keys, then kill" polling loop is inherently a coin flip
+// against machine speed (this was the previous version of this test,
+// which flaked at roughly 1/30 runs). Instead it drives migrateSingleKey
+// directly, one key at a time, and kills the real connection at an exact,
+// known point in that sequence — deterministic, but still exercising a
+// genuine network failure (Server.CloseAllConnections + closing the
+// client), not a mocked one.
 func TestDeadTargetMidRebalance(t *testing.T) {
 	srcCache := newTestCache()
 	dstCache := newTestCache()
 
-	const numKeys = 1000
+	const numKeys = 20
 	for i := 0; i < numKeys; i++ {
 		srcCache.Set(fmt.Sprintf("key:%05d", i), []byte(fmt.Sprintf("val%d", i)), 60*time.Second)
 	}
@@ -289,6 +301,7 @@ func TestDeadTargetMidRebalance(t *testing.T) {
 	if err := dstSrv.Start(ctx); err != nil {
 		t.Fatalf("target server start: %v", err)
 	}
+	defer dstSrv.Shutdown()
 
 	dstAddr := dstSrv.Addr().String()
 	dstNode := NewNode("dst", dstAddr)
@@ -297,46 +310,42 @@ func TestDeadTargetMidRebalance(t *testing.T) {
 	srcMgr := NewManager(srcNode, srcTopo, srcRing, srcCache)
 
 	dstKeys := srcMgr.collectAffectedKeys("dst")
-	if len(dstKeys) == 0 {
-		t.Fatal("no keys hash to dst — cannot test mid-rebalance failure")
+	if len(dstKeys) < 2 {
+		t.Fatal("need at least 2 keys hashing to dst to test a mid-migration kill deterministically")
 	}
 
-	// Start rebalance in background, then kill the target quickly.
-	status := srcMgr.rebalancer.StartRebalance("src", "dst", dstKeys)
+	client := network.NewClient(dstAddr)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("connect to target: %v", err)
+	}
 
-	// Wait until at least one key has been migrated, then kill the target.
-	// Polling instead of a fixed sleep avoids flakiness on fast CI machines
-	// where the full rebalance completes in <10ms.
-	deadline := time.Now().Add(5 * time.Second)
-	for dstCache.Size() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("timeout waiting for any key to migrate to target")
+	// Migrate every key except the last, then kill the connection for
+	// real, then attempt the last one on the now-dead connection.
+	migrated := 0
+	for i, key := range dstKeys {
+		if i == len(dstKeys)-1 {
+			dstSrv.CloseAllConnections()
+			client.Close()
 		}
-		time.Sleep(time.Millisecond)
-	}
-	dstSrv.Shutdown()
-	cancel()
-
-	select {
-	case <-status.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("rebalance did not complete within timeout")
+		if err := srcMgr.migrateSingleKey(key, client); err != nil {
+			continue
+		}
+		migrated++
 	}
 
-	// Some keys should still be on source (the ones that didn't make it).
+	if migrated != len(dstKeys)-1 {
+		t.Fatalf("expected exactly %d keys to migrate before the kill, got %d", len(dstKeys)-1, migrated)
+	}
+
 	remainingOnSrc := 0
 	for _, key := range dstKeys {
 		if _, err := srcCache.Get(key); err == nil {
 			remainingOnSrc++
 		}
 	}
-
-	if remainingOnSrc == 0 {
-		t.Error("expected some keys to remain on source after target died mid-rebalance")
+	if remainingOnSrc != 1 {
+		t.Errorf("expected exactly 1 key (the one attempted after the kill) to remain on source, got %d", remainingOnSrc)
 	}
-
-	t.Logf("migrated %d/%d keys, %d remaining on source after target killed",
-		len(dstKeys)-remainingOnSrc, len(dstKeys), remainingOnSrc)
 }
 
 // TestMigrateKeys_TargetNotFoundInTopology verifies that if the target node
@@ -662,5 +671,121 @@ func TestMigrateKey_PartialSuccessDeleteFails(t *testing.T) {
 	}
 	if string(val) != "contract-val" {
 		t.Errorf("target value = %q, want contract-val", string(val))
+	}
+}
+
+// raceInjectingCache wraps a real cache.Cache and, the first time TTL()
+// is called for triggerKey, writes newValue to it before returning —
+// deterministically simulating a client's write landing exactly between
+// migrateSingleKey's initial Get (which reads the OLD value to copy) and
+// its later CompareAndDelete (which must then refuse to delete, since the
+// value it would be deleting no longer matches what got copied).
+type raceInjectingCache struct {
+	cache.Cache
+	triggerKey string
+	newValue   []byte
+	fired      bool
+}
+
+func (c *raceInjectingCache) TTL(key string) (time.Duration, error) {
+	ttl, err := c.Cache.TTL(key)
+	if key == c.triggerKey && !c.fired {
+		c.fired = true
+		_ = c.Cache.Set(key, c.newValue, 0)
+	}
+	return ttl, err
+}
+
+func TestMigrateSingleKey_ConcurrentWriteDuringMigrationIsNotLost(t *testing.T) {
+	realCache := newTestCache()
+	realCache.Set("hot-key", []byte("old-value"), 0)
+	srcCache := &raceInjectingCache{
+		Cache:      realCache,
+		triggerKey: "hot-key",
+		newValue:   []byte("new-value-from-concurrent-write"),
+	}
+
+	srcTopo := NewTopology()
+	srcNode := NewNode("src", "127.0.0.1:0")
+	srcTopo.AddNode(srcNode)
+	srcRing := hashring.New(150)
+	srcRing.AddNode("src")
+	srcRing.AddNode("dst")
+
+	dstCache := newTestCache()
+	dstSrv := network.NewServer(network.ServerConfig{Addr: "127.0.0.1:0"}, dstCache)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := dstSrv.Start(ctx); err != nil {
+		t.Fatalf("target server start: %v", err)
+	}
+	t.Cleanup(func() { dstSrv.Shutdown() })
+
+	dstAddr := dstSrv.Addr().String()
+	dstNode := NewNode("dst", dstAddr)
+	srcTopo.AddNode(dstNode)
+
+	srcMgr := NewManager(srcNode, srcTopo, srcRing, srcCache)
+
+	client := network.NewClient(dstAddr)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	err := srcMgr.migrateSingleKey("hot-key", client)
+	if err == nil {
+		t.Fatal("expected migrateSingleKey to report the concurrent-write conflict rather than silently succeed")
+	}
+
+	val, gerr := srcCache.Get("hot-key")
+	if gerr != nil {
+		t.Fatalf("source should still have hot-key (concurrent write must survive): %v", gerr)
+	}
+	if string(val) != "new-value-from-concurrent-write" {
+		t.Errorf("source value = %q, want the concurrent write to have survived instead of being clobbered by the migration delete", val)
+	}
+}
+
+func TestMigrateKeys_RedirectTargetSetAfterSuccess(t *testing.T) {
+	srcCache := newTestCache()
+	srcCache.Set("moved-key", []byte("v"), 0)
+
+	srcTopo := NewTopology()
+	srcNode := NewNode("src", "127.0.0.1:0")
+	srcTopo.AddNode(srcNode)
+	srcRing := hashring.New(150)
+	srcRing.AddNode("src")
+	srcRing.AddNode("dst")
+
+	dstCache := newTestCache()
+	dstSrv := network.NewServer(network.ServerConfig{Addr: "127.0.0.1:0"}, dstCache)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := dstSrv.Start(ctx); err != nil {
+		t.Fatalf("target server start: %v", err)
+	}
+	t.Cleanup(func() { dstSrv.Shutdown() })
+
+	dstAddr := dstSrv.Addr().String()
+	dstNode := NewNode("dst", dstAddr)
+	srcTopo.AddNode(dstNode)
+
+	srcMgr := NewManager(srcNode, srcTopo, srcRing, srcCache)
+
+	if _, ok := srcMgr.RedirectTarget("moved-key"); ok {
+		t.Fatal("expected no redirect before any migration has happened")
+	}
+
+	if _, err := srcMgr.migrateKeys([]string{"moved-key"}, "dst"); err != nil {
+		t.Fatalf("migrateKeys: %v", err)
+	}
+
+	addr, ok := srcMgr.RedirectTarget("moved-key")
+	if !ok {
+		t.Fatal("expected a redirect to be recorded after a successful migration")
+	}
+	if addr != dstAddr {
+		t.Errorf("redirect address = %q, want %q", addr, dstAddr)
 	}
 }

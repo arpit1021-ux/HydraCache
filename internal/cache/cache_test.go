@@ -582,3 +582,81 @@ func TestBulkLoad(t *testing.T) {
 		t.Error("stale key should have been skipped by BulkLoad")
 	}
 }
+
+func TestCompareAndDelete_DeletesOnMatch(t *testing.T) {
+	c := New(nil)
+	c.Set("k", []byte("v1"), 0)
+
+	deleted, err := c.CompareAndDelete("k", []byte("v1"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !deleted {
+		t.Error("expected CompareAndDelete to succeed when the value matches")
+	}
+	if _, err := c.Get("k"); err == nil {
+		t.Error("key should be gone after a matching CompareAndDelete")
+	}
+}
+
+func TestCompareAndDelete_RefusesOnMismatch(t *testing.T) {
+	c := New(nil)
+	c.Set("k", []byte("v1"), 0)
+	c.Set("k", []byte("v2"), 0) // a "concurrent write" landed after the caller read v1
+
+	deleted, err := c.CompareAndDelete("k", []byte("v1"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted {
+		t.Error("expected CompareAndDelete to refuse when the current value no longer matches")
+	}
+
+	val, err := c.Get("k")
+	if err != nil {
+		t.Fatalf("key should still exist: %v", err)
+	}
+	if string(val) != "v2" {
+		t.Errorf("value = %q, want the surviving concurrent write v2", val)
+	}
+}
+
+func TestCompareAndDelete_MissingKey(t *testing.T) {
+	c := New(nil)
+	deleted, err := c.CompareAndDelete("ghost", []byte("anything"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted {
+		t.Error("expected CompareAndDelete on a missing key to report false")
+	}
+}
+
+func TestCompareAndDelete_ConcurrentWritersOnlyOneSurvivesUnaffected(t *testing.T) {
+	c := New(nil)
+	c.Set("k", []byte("original"), 0)
+
+	const attempts = 50
+	var wg sync.WaitGroup
+	successes := make(chan bool, attempts)
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, _ := c.CompareAndDelete("k", []byte("original"))
+			successes <- ok
+		}()
+	}
+	wg.Wait()
+	close(successes)
+
+	trueCount := 0
+	for ok := range successes {
+		if ok {
+			trueCount++
+		}
+	}
+	if trueCount != 1 {
+		t.Errorf("expected exactly 1 of %d concurrent CompareAndDelete calls to succeed, got %d", attempts, trueCount)
+	}
+}

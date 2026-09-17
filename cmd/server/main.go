@@ -233,6 +233,7 @@ func main() {
 	tcpServer.SetEpochSource(topo.Epoch)
 	tcpServer.SetReplicationMode(cfg.Cache.ReplicationMode, cfg.Cache.ReplicationAckCount, cfg.Cache.ReplicationSyncTimeout)
 	tcpServer.SetMetricsCollector(collector)
+	tcpServer.SetMigrationChecker(clusterMgr)
 
 	clusterMgr.SetPromotionGate(cfg.Cache.MaxPromotionLag, cfg.Cache.PromotionGateTimeout)
 

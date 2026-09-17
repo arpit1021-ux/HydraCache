@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"sync"
 )
 
@@ -54,6 +55,21 @@ func (s *Store) Delete(key string) bool {
 	_, existed := s.entries[key]
 	delete(s.entries, key)
 	return existed
+}
+
+// CompareAndDelete atomically deletes key only if its current value
+// equals expected, under a single lock acquisition — unlike a separate
+// Get-then-Delete, no other goroutine can write a new value in between.
+// Returns false (no-op) if the key is absent or its value differs.
+func (s *Store) CompareAndDelete(key string, expected []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[key]
+	if !ok || !bytes.Equal(entry.Value, expected) {
+		return false
+	}
+	delete(s.entries, key)
+	return true
 }
 
 func (s *Store) Exists(key string) bool {

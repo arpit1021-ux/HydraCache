@@ -4,7 +4,19 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// redirectTTL bounds how long a "key moved to X" redirect is honored and,
+// via the periodic purge in MarkKeyMigrated, how long it's retained at
+// all — without this, `outgoing` would grow for the lifetime of the
+// process, one entry per key ever migrated away.
+const redirectTTL = 5 * time.Minute
+
+type redirectEntry struct {
+	target    string
+	expiresAt time.Time
+}
 
 type RebalanceStatus struct {
 	SourceNode   string `json:"source_node"`
@@ -28,14 +40,59 @@ type Rebalancer struct {
 	status  map[string]*RebalanceStatus
 	mu      sync.RWMutex
 	onBatch func(keys []string, targetNode string) (int, error)
+
+	// outgoing tracks, per key, the node a key has already been migrated
+	// TO from this node. A request for that key arriving here afterward
+	// (e.g. a client whose routing view hasn't caught up with the new
+	// topology yet) can be redirected to the real owner instead of
+	// returning a false miss for data this node no longer holds. Entries
+	// expire after redirectTTL — see MarkKeyMigrated.
+	outgoing  map[string]redirectEntry
+	markCount uint64
 }
 
 func NewRebalancer(ring *HashRing, onBatch func(keys []string, targetNode string) (int, error)) *Rebalancer {
 	return &Rebalancer{
-		ring:    ring,
-		status:  make(map[string]*RebalanceStatus),
-		onBatch: onBatch,
+		ring:     ring,
+		status:   make(map[string]*RebalanceStatus),
+		outgoing: make(map[string]redirectEntry),
+		onBatch:  onBatch,
 	}
+}
+
+// MarkKeyMigrated records that key has been successfully moved to
+// targetNode, so a subsequent local lookup for it can be redirected for
+// up to redirectTTL. Periodically sweeps expired entries so `outgoing`
+// doesn't grow for the lifetime of the process.
+func (r *Rebalancer) MarkKeyMigrated(key, targetNode string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outgoing[key] = redirectEntry{target: targetNode, expiresAt: time.Now().Add(redirectTTL)}
+	r.markCount++
+	if r.markCount%1000 == 0 {
+		r.purgeExpiredLocked()
+	}
+}
+
+func (r *Rebalancer) purgeExpiredLocked() {
+	now := time.Now()
+	for k, v := range r.outgoing {
+		if now.After(v.expiresAt) {
+			delete(r.outgoing, k)
+		}
+	}
+}
+
+// RedirectTarget reports the node a key was migrated away to, if the
+// redirect is still within its TTL.
+func (r *Rebalancer) RedirectTarget(key string) (string, bool) {
+	r.mu.RLock()
+	entry, ok := r.outgoing[key]
+	r.mu.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		return "", false
+	}
+	return entry.target, true
 }
 
 func (r *Rebalancer) StartRebalance(sourceNode, targetNode string, keys []string) *RebalanceStatus {

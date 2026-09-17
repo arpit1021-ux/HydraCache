@@ -30,6 +30,9 @@ type Server struct {
 	handler      *Handler
 	quit         chan struct{}
 	shutdownOnce sync.Once
+
+	connsMu sync.Mutex
+	conns   map[net.Conn]struct{}
 }
 
 type ServerConfig struct {
@@ -102,6 +105,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
 
+	s.trackConn(conn)
+	defer s.untrackConn(conn)
+
 	s.connCount.Add(1)
 	defer s.connCount.Add(-1)
 
@@ -159,6 +165,36 @@ func (s *Server) Shutdown() {
 	s.wg.Wait()
 }
 
+func (s *Server) trackConn(conn net.Conn) {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	if s.conns == nil {
+		s.conns = make(map[net.Conn]struct{})
+	}
+	s.conns[conn] = struct{}{}
+}
+
+func (s *Server) untrackConn(conn net.Conn) {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	delete(s.conns, conn)
+}
+
+// CloseAllConnections abruptly closes every currently-connected client
+// connection without waiting for in-flight requests to finish, unlike
+// Shutdown (which only stops accepting new connections and lets existing
+// ones end naturally). This simulates a hard process crash rather than a
+// graceful stop — primarily for fault-injection tests that need a
+// deterministic "the peer died mid-request" rather than a timing-dependent
+// one.
+func (s *Server) CloseAllConnections() {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	for conn := range s.conns {
+		conn.Close()
+	}
+}
+
 func (s *Server) Addr() net.Addr {
 	if s.listener != nil {
 		return s.listener.Addr()
@@ -204,4 +240,10 @@ func (s *Server) SetReplicationMode(mode string, ackCount int, syncTimeout time.
 // observed from real replica acks is exported on /metrics.
 func (s *Server) SetMetricsCollector(c *metrics.Collector) {
 	s.handler.SetMetricsCollector(c)
+}
+
+// SetMigrationChecker wires in-flight-migration redirect support into the
+// command handler.
+func (s *Server) SetMigrationChecker(mc MigrationChecker) {
+	s.handler.SetMigrationChecker(mc)
 }

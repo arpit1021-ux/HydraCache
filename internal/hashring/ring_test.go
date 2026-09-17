@@ -139,6 +139,55 @@ func TestHashRingConsistency(t *testing.T) {
 	}
 }
 
+// TestHashRingConsistency_OnRemove is the symmetric measurement to
+// TestHashRingConsistency: removing one of three nodes should only remap
+// the keys that node owned (~1/3 of the keyspace), not redistribute
+// everything, and it must never orphan a key (every key must still
+// resolve to a live node).
+func TestHashRingConsistency_OnRemove(t *testing.T) {
+	ring := New(150)
+	ring.AddNode("node-1")
+	ring.AddNode("node-2")
+	ring.AddNode("node-3")
+
+	const numKeys = 1000
+	before := make(map[string]string, numKeys)
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key:%d", i)
+		before[key] = ring.GetNode(key)
+	}
+
+	ring.RemoveNode("node-3")
+
+	moved := 0
+	orphaned := 0
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key:%d", i)
+		after := ring.GetNode(key)
+		if after == "" {
+			orphaned++
+			continue
+		}
+		if after == "node-3" {
+			t.Fatalf("key %s still resolves to the removed node", key)
+		}
+		if before[key] != after {
+			moved++
+		}
+	}
+
+	if orphaned > 0 {
+		t.Errorf("%d/%d keys resolved to no node after removal", orphaned, numKeys)
+	}
+	// Only keys that were owned by the removed node should move. With 3
+	// roughly-equal-share nodes that's ~1/3 of the keyspace; allow
+	// generous headroom for the hash function's real-world skew.
+	if moved > numKeys/2 {
+		t.Errorf("too many keys moved on node removal: %d/%d (expected roughly 1/3, allowing up to 1/2)", moved, numKeys)
+	}
+	t.Logf("node removal remapped %d/%d keys (%.1f%%)", moved, numKeys, 100*float64(moved)/float64(numKeys))
+}
+
 func TestHashRingSuccessorAfterRemoval(t *testing.T) {
 	ring := New(150)
 	ring.AddNode("node-1")
