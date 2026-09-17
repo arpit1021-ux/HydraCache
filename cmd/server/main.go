@@ -85,8 +85,10 @@ func main() {
 	var snapshotter *persistence.Snapshotter
 
 	if cfg.WAL.Enabled {
-		var err error
-		syncMode := persistence.SyncModeFromString(cfg.WAL.SyncMode)
+		syncMode, err := persistence.SyncModeFromString(cfg.WAL.SyncMode)
+		if err != nil {
+			log.Fatalf("[main] invalid config: %v", err)
+		}
 		wal, err = persistence.NewWAL(cfg.WAL.Dir, cfg.WAL.MaxSize, syncMode)
 		if err != nil {
 			log.Printf("[main] warning: WAL init failed: %v", err)

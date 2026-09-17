@@ -1,6 +1,9 @@
 package persistence
 
 import (
+	"encoding/binary"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -42,6 +45,203 @@ func TestWALRecovery(t *testing.T) {
 	entries, _ := wal2.Replay()
 	if len(entries) != 1 {
 		t.Errorf("expected 1 recovered entry, got %d", len(entries))
+	}
+}
+
+// corruptTail truncates the WAL file to length+extra bytes of garbage
+// appended, or just truncates it shorter, simulating a crash mid-write:
+// the last record on disk is torn (a partial header, a partial payload,
+// or a length field pointing past EOF), not merely absent.
+func corruptTail(t *testing.T, dir string, truncateTo int64, garbage []byte) {
+	t.Helper()
+	path := filepath.Join(dir, "wal.log")
+	f, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open wal.log for corruption: %v", err)
+	}
+	defer f.Close()
+	if err := f.Truncate(truncateTo); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if len(garbage) > 0 {
+		if _, err := f.WriteAt(garbage, truncateTo); err != nil {
+			t.Fatalf("write garbage: %v", err)
+		}
+	}
+}
+
+// TestWALRecovery_TornTailIsTruncatedNotPermanentlyStuck is the direct
+// regression test for the audit finding: recover() used to break out of
+// the replay loop on a bad record but then seek to the file's ACTUAL end
+// (past the garbage) rather than truncating it off. Because the file is
+// opened O_APPEND, every subsequent Append landed after that garbage, and
+// every future restart's replay hit the same corrupt bytes at the same
+// offset and stopped there again — silently and permanently discarding
+// every record ever written after the crash point, with no error ever
+// surfaced. This proves a torn tail is truncated once, and normal
+// operation (including surviving a SECOND restart) resumes cleanly.
+func TestWALRecovery_TornTailIsTruncatedNotPermanentlyStuck(t *testing.T) {
+	dir := t.TempDir()
+
+	wal1, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	_ = wal1.Append(WALEntry{Cmd: "SET", Key: "good1", Value: []byte("v1")})
+	_ = wal1.Append(WALEntry{Cmd: "SET", Key: "good2", Value: []byte("v2")})
+	goodSize := wal1.Size()
+	// This record's bytes will be torn off after the file handle closes.
+	_ = wal1.Append(WALEntry{Cmd: "SET", Key: "torn", Value: []byte("this-wont-survive")})
+	fullSize := wal1.Size()
+	if err = wal1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if fullSize <= goodSize {
+		t.Fatal("test setup invariant broken: third append didn't grow the file")
+	}
+
+	// Simulate a crash mid-write: chop off the last record partway
+	// through, leaving a torn header/payload, not a clean boundary.
+	tornAt := goodSize + (fullSize-goodSize)/2
+	corruptTail(t, dir, tornAt, nil)
+
+	// First restart: recovery must truncate the torn bytes and come up
+	// with exactly the 2 good records, not error out, not hang, and not
+	// silently keep the garbage in place.
+	wal2, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL after torn tail: %v", err)
+	}
+	entries, err := wal2.Replay()
+	if err != nil {
+		t.Fatalf("Replay after torn tail: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 surviving good entries after torn-tail recovery, got %d", len(entries))
+	}
+
+	// Write a new record after recovery — this is exactly what the old
+	// bug prevented from ever being readable again.
+	if err = wal2.Append(WALEntry{Cmd: "SET", Key: "after-recovery", Value: []byte("v3")}); err != nil {
+		t.Fatalf("Append after recovery: %v", err)
+	}
+	if err = wal2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Second restart: the record written after the first recovery must
+	// actually be there. Under the old bug, replay would hit leftover
+	// garbage at the same offset on THIS restart too and silently drop
+	// it, or (if truncation only happened once) it would already be
+	// fine — the real assertion is that it is fine now, not "eventually."
+	wal3, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL on second restart: %v", err)
+	}
+	defer wal3.Close()
+	entries, err = wal3.Replay()
+	if err != nil {
+		t.Fatalf("Replay on second restart: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (2 original + 1 post-recovery) on second restart, got %d", len(entries))
+	}
+	if entries[2].Key != "after-recovery" {
+		t.Errorf("expected third entry to be 'after-recovery', got %q", entries[2].Key)
+	}
+}
+
+// TestWALRecovery_TornAtRecordHeaderBoundary covers the other torn-write
+// shape: the crash happens before even the CRC/length header of the next
+// record is fully written (as opposed to a torn payload after a complete
+// header) — a shorter, more common crash window in practice.
+func TestWALRecovery_TornAtRecordHeaderBoundary(t *testing.T) {
+	dir := t.TempDir()
+
+	wal1, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	_ = wal1.Append(WALEntry{Cmd: "SET", Key: "good", Value: []byte("v1")})
+	goodSize := wal1.Size()
+	if err = wal1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Append 3 garbage bytes — less than the 8-byte crc+length header —
+	// directly onto the file, simulating a crash after only a partial
+	// header hit disk.
+	corruptTail(t, dir, goodSize, []byte{0xDE, 0xAD, 0xBE})
+
+	wal2, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL after torn header: %v", err)
+	}
+	entries, err := wal2.Replay()
+	if err != nil {
+		t.Fatalf("Replay after torn header: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 surviving entry, got %d", len(entries))
+	}
+
+	if err = wal2.Append(WALEntry{Cmd: "SET", Key: "new", Value: []byte("v2")}); err != nil {
+		t.Fatalf("Append after recovery: %v", err)
+	}
+	if err = wal2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	wal3, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL on second restart: %v", err)
+	}
+	defer wal3.Close()
+	entries, err = wal3.Replay()
+	if err != nil {
+		t.Fatalf("Replay on second restart: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries on second restart, got %d", len(entries))
+	}
+}
+
+// TestWALRecovery_LengthFieldPointsPastEOF covers a corrupted length
+// field (not just missing bytes): a record whose header claims more
+// payload than actually exists in the file. io.ReadFull returns
+// io.ErrUnexpectedEOF in that case, which recover() must treat as a torn
+// tail (truncate) rather than propagating an error that fails startup.
+func TestWALRecovery_LengthFieldPointsPastEOF(t *testing.T) {
+	dir := t.TempDir()
+
+	wal1, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	_ = wal1.Append(WALEntry{Cmd: "SET", Key: "good", Value: []byte("v1")})
+	goodSize := wal1.Size()
+	if err = wal1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A record header claiming a huge payload length, with no payload
+	// bytes actually present: [4-byte CRC][4-byte length=9999][nothing].
+	header := make([]byte, 8)
+	binary.BigEndian.PutUint32(header[0:4], 0x12345678)
+	binary.BigEndian.PutUint32(header[4:8], 9999)
+	corruptTail(t, dir, goodSize, header)
+
+	wal2, err := NewWAL(dir, 1024*1024, SyncEveryWrite)
+	if err != nil {
+		t.Fatalf("NewWAL after bad length field: %v", err)
+	}
+	defer wal2.Close()
+	entries, err := wal2.Replay()
+	if err != nil {
+		t.Fatalf("Replay after bad length field: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 surviving entry, got %d", len(entries))
 	}
 }
 
@@ -426,22 +626,36 @@ func TestRecoverFlushAll(t *testing.T) {
 
 func TestSyncModeFromString(t *testing.T) {
 	tests := []struct {
-		input string
-		want  SyncMode
+		input   string
+		want    SyncMode
+		wantErr bool
 	}{
-		{"batch", SyncBatch},
-		{"every_write", SyncEveryWrite},
-		{"everywrite", SyncEveryWrite},
-		{"sync", SyncEveryWrite},
-		{"async", SyncAsync},
-		{"none", SyncAsync},
-		{"garbage", SyncBatch}, // default
-		{"", SyncBatch},        // default
+		{input: "always", want: SyncEveryWrite},
+		{input: "every_write", want: SyncEveryWrite},
+		{input: "everywrite", want: SyncEveryWrite},
+		{input: "sync", want: SyncEveryWrite},
+		{input: "everysec", want: SyncEverySec},
+		{input: "batch", want: SyncEverySec}, // back-compat alias
+		{input: "never", want: SyncNever},
+		{input: "no", want: SyncNever},
+		{input: "async", want: SyncNever},
+		{input: "none", want: SyncNever},
+		{input: "garbage", wantErr: true},
+		{input: "", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := SyncModeFromString(tt.input)
+			got, err := SyncModeFromString(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("SyncModeFromString(%q) expected an error, got mode %v", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SyncModeFromString(%q) unexpected error: %v", tt.input, err)
+			}
 			if got != tt.want {
 				t.Errorf("SyncModeFromString(%q) = %d, want %d", tt.input, got, tt.want)
 			}
@@ -449,15 +663,15 @@ func TestSyncModeFromString(t *testing.T) {
 	}
 }
 
-func TestWALAsyncSyncMode(t *testing.T) {
+func TestWALNeverSyncMode(t *testing.T) {
 	dir := t.TempDir()
-	wal, err := NewWAL(dir, 1024*1024, SyncAsync)
+	wal, err := NewWAL(dir, 1024*1024, SyncNever)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer wal.Close()
 
-	// Should not panic or error — SyncAsync is a no-op.
+	// Should not panic or error — SyncNever never calls fsync explicitly.
 	for i := 0; i < 5; i++ {
 		_ = wal.Append(WALEntry{Cmd: "SET", Key: "k", Value: []byte("v")})
 	}
@@ -468,6 +682,29 @@ func TestWALAsyncSyncMode(t *testing.T) {
 	}
 	if len(entries) != 5 {
 		t.Errorf("expected 5 entries, got %d", len(entries))
+	}
+}
+
+func TestWALEverySecSyncMode_BackgroundSyncRunsAndStopsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	wal, err := NewWAL(dir, 1024*1024, SyncEverySec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = wal.Append(WALEntry{Cmd: "SET", Key: "k", Value: []byte("v")})
+
+	// Close must stop the periodic-sync goroutine and return promptly,
+	// not hang waiting on a ticker that never fires again.
+	done := make(chan struct{})
+	go func() {
+		_ = wal.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WAL.Close() did not return — periodic sync goroutine likely leaked")
 	}
 }
 

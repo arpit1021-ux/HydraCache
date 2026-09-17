@@ -64,8 +64,8 @@ func TestDefaultConfig_ReturnsPopulatedValues(t *testing.T) {
 	if cfg.WAL.MaxSize != 100*1024*1024 {
 		t.Errorf("WAL.MaxSize = %d, want %d", cfg.WAL.MaxSize, 100*1024*1024)
 	}
-	if cfg.WAL.SyncMode != "batch" {
-		t.Errorf("WAL.SyncMode = %q, want %q", cfg.WAL.SyncMode, "batch")
+	if cfg.WAL.SyncMode != "everysec" {
+		t.Errorf("WAL.SyncMode = %q, want %q", cfg.WAL.SyncMode, "everysec")
 	}
 	if !cfg.WAL.EnabledSnapshot {
 		t.Error("WAL.EnabledSnapshot should be true")

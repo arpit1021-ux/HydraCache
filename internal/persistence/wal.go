@@ -2,9 +2,11 @@ package persistence
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,15 +33,51 @@ type WAL struct {
 	maxSize    int64
 	syncMode   SyncMode
 	writeCount int64
+
+	stopCh   chan struct{}
+	wg       sync.WaitGroup
+	stopOnce sync.Once
 }
 
+// SyncMode is the WAL's fsync policy, matching the three modes real
+// durability tools (Redis's appendfsync, PostgreSQL's synchronous_commit)
+// expose, because "configurable in some novel way" is worse than
+// matching an operator's existing mental model:
+//
+//   - SyncEveryWrite ("always"): fsync after every single Append. Zero
+//     data loss on crash or power failure. Highest per-write latency —
+//     bounded by the storage device's fsync cost, typically ~1-10ms on
+//     an SSD, far more on spinning disk or some network-attached volumes.
+//   - SyncEverySec ("everysec"): a background goroutine fsyncs at most
+//     once per second, decoupled from write volume. Bounded loss on crash:
+//     up to ~1 second of the most recently acknowledged writes. This is
+//     the recommended default — the same tradeoff Redis's own default
+//     (everysec) makes.
+//   - SyncNever ("never"): no explicit fsync; durability depends entirely
+//     on the OS flushing dirty pages on its own schedule (commonly within
+//     30s, but not guaranteed by this WAL). Highest throughput, largest
+//     and least predictable loss window. Only appropriate for pure-cache
+//     workloads where the WAL is a performance nicety, not a guarantee.
 type SyncMode int
 
 const (
 	SyncEveryWrite SyncMode = iota
-	SyncBatch
-	SyncAsync
+	SyncEverySec
+	SyncNever
 )
+
+func (m SyncMode) String() string {
+	switch m {
+	case SyncEveryWrite:
+		return "always"
+	case SyncEverySec:
+		return "everysec"
+	case SyncNever:
+		return "never"
+	default:
+		return "unknown"
+	}
+}
 
 func NewWAL(dir string, maxSize int64, syncMode SyncMode) (*WAL, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -57,33 +95,91 @@ func NewWAL(dir string, maxSize int64, syncMode SyncMode) (*WAL, error) {
 		dir:      dir,
 		maxSize:  maxSize,
 		syncMode: syncMode,
+		stopCh:   make(chan struct{}),
 	}
 
-	w.recover()
+	if err := w.recover(); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("WAL recovery failed: %w", err)
+	}
+
+	if syncMode == SyncEverySec {
+		w.wg.Add(1)
+		go w.periodicSync(time.Second)
+	}
 
 	return w, nil
 }
 
-func (w *WAL) recover() {
+// recover replays the WAL to find the highest sequence number and,
+// critically, truncates any torn tail record left by a crash mid-write.
+// Without this, a corrupt/short record at the end of the file would be
+// silently re-encountered at the same offset on every future restart —
+// readEntry's error would end the replay loop there every time, forever
+// discarding every record written after the crash point, with no error
+// ever surfaced. Truncating the torn bytes now means a future Append
+// picks up cleanly right after the last verified-good record.
+func (w *WAL) recover() error {
 	info, err := w.file.Stat()
-	if err != nil || info.Size() == 0 {
-		return
+	if err != nil {
+		return fmt.Errorf("stat WAL file: %w", err)
+	}
+	if info.Size() == 0 {
+		return nil
 	}
 
-	_, _ = w.file.Seek(0, io.SeekStart)
-	var maxSeq int64
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek to start: %w", err)
+	}
 
+	var maxSeq int64
+	var validEnd int64
 	for {
+		pos, err := w.file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return fmt.Errorf("seek current: %w", err)
+		}
+
 		entry, err := w.readEntry()
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				log.Printf("[wal] torn or corrupt record at offset %d, truncating tail: %v", pos, err)
+			}
+			validEnd = pos
 			break
 		}
 		if entry.Seq > maxSeq {
 			maxSeq = entry.Seq
 		}
 	}
+
+	if validEnd < info.Size() {
+		// Truncate via the path rather than w.file.Truncate(): on
+		// Windows, a handle opened with O_APPEND can be denied the
+		// access rights SetEndOfFile needs even though it was also
+		// opened O_RDWR. Closing, truncating, and reopening sidesteps
+		// that platform quirk and matches the pattern Truncate() (the
+		// full-wipe method below) already uses.
+		name := w.file.Name()
+		if err := w.file.Close(); err != nil {
+			return fmt.Errorf("close WAL file before truncating torn tail: %w", err)
+		}
+		if err := os.Truncate(name, validEnd); err != nil {
+			return fmt.Errorf("truncate torn WAL tail at offset %d: %w", validEnd, err)
+		}
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("reopen WAL file after truncating torn tail: %w", err)
+		}
+		w.file = f
+	}
+
 	w.seq = maxSeq
-	_, _ = w.file.Seek(0, io.SeekEnd)
+	w.size = validEnd
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("seek to end: %w", err)
+	}
+	return nil
 }
 
 func (w *WAL) Append(entry WALEntry) error {
@@ -104,25 +200,36 @@ func (w *WAL) Append(entry WALEntry) error {
 	w.size += int64(len(data) + 8)
 	atomic.AddInt64(&w.writeCount, 1)
 
-	switch w.syncMode {
-	case SyncEveryWrite:
+	if w.syncMode == SyncEveryWrite {
 		if err := w.file.Sync(); err != nil {
 			return fmt.Errorf("WAL sync failed: %w", err)
 		}
-	case SyncBatch:
-		if atomic.LoadInt64(&w.writeCount)%100 == 0 {
-			if err := w.file.Sync(); err != nil {
-				return fmt.Errorf("WAL sync failed: %w", err)
-			}
-		}
-	case SyncAsync:
-		// Explicit no-op: rely on OS page cache flush. Writes are
-		// durable only after the kernel flushes dirty pages (typically
-		// within 30s). Acceptable for throughput-oriented workloads
-		// where up to 30s of writes may be lost on power failure.
 	}
+	// SyncEverySec: handled by the background periodicSync goroutine,
+	// decoupled from write volume. SyncNever: no explicit fsync at all.
 
 	return nil
+}
+
+// periodicSync fsyncs at most once per interval for SyncEverySec. It
+// always exits: either interval fires and it loops, or stopCh closes and
+// it returns — Close() joins it via wg before returning.
+func (w *WAL) periodicSync(interval time.Duration) {
+	defer w.wg.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+			w.mu.Lock()
+			if err := w.file.Sync(); err != nil {
+				log.Printf("[wal] periodic sync failed: %v", err)
+			}
+			w.mu.Unlock()
+		}
+	}
 }
 
 func (w *WAL) readEntry() (*WALEntry, error) {
@@ -208,19 +315,29 @@ func (w *WAL) Seq() int64 {
 	return atomic.LoadInt64(&w.seq)
 }
 
-// SyncModeFromString converts a config string to a SyncMode constant.
-func SyncModeFromString(s string) SyncMode {
+// SyncModeFromString converts a config string to a SyncMode, matching
+// Redis's appendfsync naming (always/everysec/no) as the canonical
+// spelling, with a few tolerated aliases. Unlike the previous version,
+// an unrecognized string is a hard error rather than a silent fallback to
+// SyncEverySec — a typo in sync_mode should fail startup loudly, not
+// quietly downgrade the durability guarantee an operator asked for.
+func SyncModeFromString(s string) (SyncMode, error) {
 	switch s {
-	case "every_write", "everywrite", "sync":
-		return SyncEveryWrite
-	case "async", "none":
-		return SyncAsync
+	case "always", "every_write", "everywrite", "sync":
+		return SyncEveryWrite, nil
+	case "everysec", "batch":
+		return SyncEverySec, nil
+	case "never", "no", "async", "none":
+		return SyncNever, nil
 	default:
-		return SyncBatch
+		return SyncEveryWrite, fmt.Errorf("unknown wal sync_mode %q: must be one of always, everysec, never", s)
 	}
 }
 
 func (w *WAL) Close() error {
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.wg.Wait()
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.file.Sync(); err != nil {

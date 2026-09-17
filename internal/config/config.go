@@ -122,7 +122,7 @@ func DefaultConfig() *Config {
 			Enabled:          true,
 			Dir:              "./data/wal",
 			MaxSize:          100 * 1024 * 1024,
-			SyncMode:         "batch",
+			SyncMode:         "everysec",
 			EnabledSnapshot:  true,
 			SnapshotInterval: 60 * time.Second,
 		},
