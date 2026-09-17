@@ -10,6 +10,7 @@ import (
 
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/hashring"
+	"github.com/hydracache/hydracache/internal/heartbeat"
 	"github.com/hydracache/hydracache/internal/network"
 	"github.com/hydracache/hydracache/internal/replication"
 )
@@ -448,6 +449,34 @@ func TestManager_NewManager(t *testing.T) {
 	if mgr.Ring() != ring {
 		t.Error("Ring() should return the ring")
 	}
+}
+
+// TestManager_SetDetectorThresholds proves config.Cluster.PhiThreshold /
+// SuspectTimeout actually reach the live detector through this
+// passthrough, rather than the detector silently keeping its own
+// hardcoded defaults regardless of what main.go passes in. An
+// aggressively short suspect timeout must make dead-detection complete
+// much faster than the 5s default would allow.
+func TestManager_SetDetectorThresholds(t *testing.T) {
+	self := NewNode("self", "127.0.0.1:7000")
+	topo := NewTopology()
+	mgr := NewManager(self, topo, hashring.New(150), newTestCache())
+
+	mgr.SetDetectorThresholds(0.001, 150*time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		mgr.Detector().RecordHeartbeat(heartbeat.HeartbeatMessage{NodeID: "peer", Seq: int64(i + 1)})
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if dead := mgr.Detector().CheckFailures(); len(dead) > 0 {
+			return // detected well within the 5s hardcoded default
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("peer was not declared dead within 2s despite a 150ms suspect timeout — thresholds were not applied")
 }
 
 func TestManager_Start(t *testing.T) {

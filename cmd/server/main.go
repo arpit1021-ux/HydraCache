@@ -132,6 +132,7 @@ func main() {
 	hashRing.AddNode(cfg.Cluster.NodeID)
 
 	clusterMgr := cluster.NewManager(selfNode, topo, hashRing, localCache)
+	clusterMgr.SetDetectorThresholds(cfg.Cluster.PhiThreshold, cfg.Cluster.SuspectTimeout)
 	if err := clusterMgr.Start(ctx); err != nil {
 		log.Fatalf("Failed to start cluster manager: %v", err)
 	}

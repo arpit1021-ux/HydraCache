@@ -92,8 +92,8 @@ func TestFirstHeartbeatDoesNotCorruptPhi(t *testing.T) {
 
 	// Verify no intervals were recorded from the first heartbeat.
 	entry := d.entries["node-1"]
-	if len(entry.intervals) != 0 {
-		t.Fatalf("expected 0 intervals after first heartbeat, got %d (spurious interval injected)", len(entry.intervals))
+	if len(entry.samples) != 0 {
+		t.Fatalf("expected 0 intervals after first heartbeat, got %d (spurious interval injected)", len(entry.samples))
 	}
 
 	// Second heartbeat after a real gap.
@@ -104,10 +104,10 @@ func TestFirstHeartbeatDoesNotCorruptPhi(t *testing.T) {
 	})
 
 	// Now there should be exactly 1 real interval (~100ms), not years.
-	if len(entry.intervals) != 1 {
-		t.Fatalf("expected 1 interval after second heartbeat, got %d", len(entry.intervals))
+	if len(entry.samples) != 1 {
+		t.Fatalf("expected 1 interval after second heartbeat, got %d", len(entry.samples))
 	}
-	interval := entry.intervals[0]
+	interval := entry.samples[0].d
 	if interval < 50*time.Millisecond || interval > 500*time.Millisecond {
 		t.Fatalf("expected interval ~100ms, got %v — first heartbeat likely corrupted timing", interval)
 	}
@@ -125,8 +125,8 @@ func TestFirstHeartbeatDoesNotCorruptPhi(t *testing.T) {
 		Seq:    3,
 	})
 
-	if len(entry.intervals) != 2 {
-		t.Fatalf("expected 2 intervals after third heartbeat, got %d", len(entry.intervals))
+	if len(entry.samples) != 2 {
+		t.Fatalf("expected 2 intervals after third heartbeat, got %d", len(entry.samples))
 	}
 
 	// Now phi should be computable and small (heartbeat just arrived).
@@ -176,7 +176,7 @@ func TestDeadNodeDetectedWithinBoundedTime(t *testing.T) {
 			return
 		}
 		if time.Since(started) > 1*time.Second {
-			t.Logf("still waiting: phi=%.2f, heartbeatElapsed=%v, intervals=%d", phi, elapsed, len(d.entries["node-1"].intervals))
+			t.Logf("still waiting: phi=%.2f, heartbeatElapsed=%v, intervals=%d", phi, elapsed, len(d.entries["node-1"].samples))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

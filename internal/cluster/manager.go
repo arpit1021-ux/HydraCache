@@ -142,6 +142,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
+// SetDetectorThresholds tunes the phi-accrual failure detector's
+// threshold and suspect timeout at runtime — wiring real
+// config.Cluster.PhiThreshold/SuspectTimeout, which previously had no
+// effect since NewDetector always used its own hardcoded defaults.
+func (m *Manager) SetDetectorThresholds(phiThreshold float64, suspectTimeout time.Duration) {
+	m.detector.SetThresholds(phiThreshold, suspectTimeout)
+}
+
 // SetPromotionGate configures the failover promotion gate: a dead
 // primary's ring-successor replica is only promoted once its replication
 // lag is at or below maxLag, waiting up to gateTimeout before promoting
