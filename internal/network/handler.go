@@ -551,7 +551,9 @@ func (h *Handler) handleFlushAll(cmd *protocol.Command) *Response {
 		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
 	}
 	h.cache.Flush()
-	h.replicateWrite(cmd.Name, cmd.Args)
+	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
+		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+	}
 	return &Response{data: []byte("+OK\r\n")}
 }
 
@@ -741,11 +743,11 @@ func (h *Handler) sendReplicateOne(addr string, op replication.Operation, timeou
 		return fmt.Errorf("marshal replication op: %w", err)
 	}
 	client := NewClientWithTimeout(addr, timeout)
-	if err := client.Connect(); err != nil {
+	if err = client.Connect(); err != nil {
 		return fmt.Errorf("connect to %s: %w", addr, err)
 	}
 	defer client.Close()
-	if err := client.SetDeadline(time.Now().Add(timeout)); err != nil {
+	if err = client.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return fmt.Errorf("set deadline for %s: %w", addr, err)
 	}
 	resp, err := client.Send("REPLICATE", string(payload))
