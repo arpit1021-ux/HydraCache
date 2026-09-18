@@ -39,4 +39,4 @@ USER hydracache
 EXPOSE 7379 8379
 
 ENTRYPOINT ["/app/hydracache"]
-CMD ["-addr", ":7379", "-http", ":8379"]
+CMD ["-addr", ":7379", "-http", ":8379", "-data-dir", "/data/wal"]
