@@ -14,6 +14,7 @@ type CommandDef struct {
 
 var Commands = map[string]CommandDef{
 	"PING":               {Name: "PING", MinArgs: 0, MaxArgs: 1, ReadOnly: true},
+	"AUTH":               {Name: "AUTH", MinArgs: 1, MaxArgs: 2, ReadOnly: true},
 	"SET":                {Name: "SET", MinArgs: 2, MaxArgs: 5, ReadOnly: false},
 	"GET":                {Name: "GET", MinArgs: 1, MaxArgs: 1, ReadOnly: true},
 	"DEL":                {Name: "DEL", MinArgs: 1, MaxArgs: -1, ReadOnly: false},

@@ -18,6 +18,23 @@ type Config struct {
 	WAL     WALConfig     `yaml:"wal"`
 	Log     LogConfig     `yaml:"log"`
 	HTTP    HTTPConfig    `yaml:"http"`
+	Auth    AuthConfig    `yaml:"auth"`
+}
+
+// AuthConfig configures per-connection AUTH and ACL enforcement. Disabled
+// by default — an existing deployment's config file with no auth section
+// keeps running exactly as before.
+type AuthConfig struct {
+	Enabled bool             `yaml:"enabled"`
+	Users   []AuthUserConfig `yaml:"users"`
+}
+
+type AuthUserConfig struct {
+	Username string `yaml:"username"`
+	// Password is plaintext, or "sha256:<hex>" — see internal/auth.User.
+	Password    string   `yaml:"password"`
+	Commands    []string `yaml:"commands"`
+	KeyPatterns []string `yaml:"key_patterns"`
 }
 
 type ServerConfig struct {

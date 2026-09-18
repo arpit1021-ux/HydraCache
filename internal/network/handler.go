@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hydracache/hydracache/internal/auth"
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
@@ -63,7 +64,19 @@ type Handler struct {
 	syncTimeout      time.Duration
 	metricsCollector *metrics.Collector
 	migration        MigrationChecker
+	acl              *auth.ACL
 }
+
+// Session holds per-connection state that must not be shared across
+// connections — currently just AUTH status. The Server creates one per
+// accepted connection and threads it through HandleAuthenticated for
+// every command read on that connection.
+type Session struct {
+	authenticated bool
+	username      string
+}
+
+const defaultAuthUsername = "default"
 
 // GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
 type GossipHandler interface {
@@ -137,6 +150,103 @@ func (h *Handler) SetMetricsCollector(c *metrics.Collector) {
 // new owner instead of being reported as a genuine miss.
 func (h *Handler) SetMigrationChecker(mc MigrationChecker) {
 	h.migration = mc
+}
+
+// SetAuth enables AUTH/ACL enforcement for client connections. Must be
+// called before the server starts accepting connections. When never
+// called, HandleAuthenticated behaves exactly like Handle (no auth
+// gate) — existing deployments and every test that predates auth are
+// unaffected.
+func (h *Handler) SetAuth(acl *auth.ACL) {
+	h.acl = acl
+}
+
+// HandleAuthenticated is the entry point for commands read off a client
+// connection (as opposed to internal dispatch — replicated-op application,
+// election/gossip RPCs — which call Handle directly and are never subject
+// to client ACL checks, since those are inter-node, not client-facing).
+// When no ACL is configured (SetAuth never called), it behaves exactly
+// like Handle.
+func (h *Handler) HandleAuthenticated(cmd *protocol.Command, sess *Session) *Response {
+	if h.acl == nil || isInterNodeCommand(cmd.Name) {
+		// Inter-node RPCs (gossip, replication, election) arrive over the
+		// same listener as client connections, but a peer node never
+		// sends AUTH — client ACL is the wrong control for them. Node-to-
+		// node trust belongs to mutual TLS (not implemented yet), not to
+		// the per-connection client session gate: exempting them here is
+		// what keeps clustering working at all once AUTH is enabled,
+		// rather than gating them on a session no peer will ever
+		// authenticate.
+		return h.Handle(cmd)
+	}
+
+	if cmd.Name == "AUTH" {
+		return h.handleAuth(cmd, sess)
+	}
+	if !sess.authenticated {
+		return &Response{err: fmt.Errorf("NOAUTH Authentication required")}
+	}
+
+	keys := commandKeys(cmd)
+	if len(keys) == 0 {
+		if !h.acl.Allowed(sess.username, cmd.Name, "") {
+			return &Response{err: fmt.Errorf("NOPERM this user has no permissions to run the '%s' command", strings.ToLower(cmd.Name))}
+		}
+	} else {
+		for _, key := range keys {
+			if !h.acl.Allowed(sess.username, cmd.Name, key) {
+				return &Response{err: fmt.Errorf("NOPERM this user has no permissions to access one or more keys used as arguments for '%s'", strings.ToLower(cmd.Name))}
+			}
+		}
+	}
+	return h.Handle(cmd)
+}
+
+func (h *Handler) handleAuth(cmd *protocol.Command, sess *Session) *Response {
+	var username, password string
+	switch len(cmd.Args) {
+	case 1:
+		username, password = defaultAuthUsername, cmd.Args[0]
+	case 2:
+		username, password = cmd.Args[0], cmd.Args[1]
+	default:
+		return &Response{err: fmt.Errorf("wrong number of arguments for 'auth' command")}
+	}
+
+	if !h.acl.Authenticate(username, password) {
+		sess.authenticated = false
+		sess.username = ""
+		return &Response{err: fmt.Errorf("WRONGPASS invalid username-password pair or user is disabled")}
+	}
+	sess.authenticated = true
+	sess.username = username
+	return &Response{data: []byte("+OK\r\n")}
+}
+
+// isInterNodeCommand reports whether name is a server-to-server RPC
+// (gossip, replication, election) rather than a client-facing command.
+func isInterNodeCommand(name string) bool {
+	switch name {
+	case "GOSSIP", "REPLICATE", "REPLICA_SYNC", "ELECTION_VOTE", "ELECTION_HEARTBEAT":
+		return true
+	default:
+		return false
+	}
+}
+
+// commandKeys returns the key arguments an ACL key-pattern check should
+// apply to. Commands not listed here have no natural single key argument
+// and are gated by command permission alone.
+func commandKeys(cmd *protocol.Command) []string {
+	switch cmd.Name {
+	case "GET", "TTL", "PTTL", "PERSIST", "EXPIRE", "SET":
+		if len(cmd.Args) > 0 {
+			return cmd.Args[:1]
+		}
+	case "DEL", "EXISTS":
+		return cmd.Args
+	}
+	return nil
 }
 
 func (h *Handler) Handle(cmd *protocol.Command) *Response {

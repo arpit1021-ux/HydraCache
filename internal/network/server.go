@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hydracache/hydracache/internal/auth"
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/election"
 	"github.com/hydracache/hydracache/internal/hashring"
@@ -119,6 +120,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	parser := protocol.NewParser(reader)
 	encoder := protocol.NewEncoder(writer)
+	sess := &Session{}
 
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Minute))
 
@@ -142,7 +144,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Minute))
-		response := s.handler.Handle(cmd)
+		response := s.handler.HandleAuthenticated(cmd, sess)
 		if err := response.WriteTo(encoder); err != nil {
 			return
 		}
@@ -246,4 +248,10 @@ func (s *Server) SetMetricsCollector(c *metrics.Collector) {
 // command handler.
 func (s *Server) SetMigrationChecker(mc MigrationChecker) {
 	s.handler.SetMigrationChecker(mc)
+}
+
+// SetAuth enables AUTH/ACL enforcement for client connections. Must be
+// called before the server starts accepting connections.
+func (s *Server) SetAuth(acl *auth.ACL) {
+	s.handler.SetAuth(acl)
 }

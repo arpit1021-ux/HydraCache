@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hydracache/hydracache/internal/auth"
 	"github.com/hydracache/hydracache/internal/cache"
 	"github.com/hydracache/hydracache/internal/cluster"
 	"github.com/hydracache/hydracache/internal/config"
@@ -237,6 +238,24 @@ func main() {
 	tcpServer.SetReplicationMode(cfg.Cache.ReplicationMode, cfg.Cache.ReplicationAckCount, cfg.Cache.ReplicationSyncTimeout)
 	tcpServer.SetMetricsCollector(collector)
 	tcpServer.SetMigrationChecker(clusterMgr)
+
+	if cfg.Auth.Enabled {
+		users := make([]auth.User, 0, len(cfg.Auth.Users))
+		for _, u := range cfg.Auth.Users {
+			users = append(users, auth.User{
+				Username:    u.Username,
+				Password:    u.Password,
+				Commands:    u.Commands,
+				KeyPatterns: u.KeyPatterns,
+			})
+		}
+		acl, err := auth.New(users)
+		if err != nil {
+			log.Fatalf("[main] invalid config: %v", err)
+		}
+		tcpServer.SetAuth(acl)
+		log.Printf("[main] AUTH/ACL enabled (%d user(s))", len(users))
+	}
 
 	clusterMgr.SetPromotionGate(cfg.Cache.MaxPromotionLag, cfg.Cache.PromotionGateTimeout)
 
