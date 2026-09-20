@@ -29,10 +29,21 @@ func NewCollector() *Collector {
 	}
 }
 
-func (c *Collector) IncrRequests()         { c.requestsTotal.Add(1) }
-func (c *Collector) IncrHits()             { c.hitsTotal.Add(1) }
-func (c *Collector) IncrMisses()           { c.missesTotal.Add(1) }
-func (c *Collector) IncrEvictions()        { c.evictionsTotal.Add(1) }
+func (c *Collector) IncrRequests()  { c.requestsTotal.Add(1) }
+func (c *Collector) IncrHits()      { c.hitsTotal.Add(1) }
+func (c *Collector) IncrMisses()    { c.missesTotal.Add(1) }
+func (c *Collector) IncrEvictions() { c.evictionsTotal.Add(1) }
+
+// SetHits, SetMisses, and SetEvictions overwrite the running total
+// directly rather than incrementing it — used when a source that already
+// counts these accurately elsewhere (cache.LocalCache, which needs its
+// own hit/miss/eviction counts for HitRate() and eviction bookkeeping
+// regardless of metrics) is periodically pushed in, instead of
+// duplicating that counting here via a per-Get/per-eviction callback.
+func (c *Collector) SetHits(n int64)      { c.hitsTotal.Store(n) }
+func (c *Collector) SetMisses(n int64)    { c.missesTotal.Store(n) }
+func (c *Collector) SetEvictions(n int64) { c.evictionsTotal.Store(n) }
+
 func (c *Collector) SetKeys(n int64)       { c.keysTotal.Store(n) }
 func (c *Collector) SetMemory(n int64)     { c.memoryBytes.Store(n) }
 func (c *Collector) SetConns(n int64)      { c.connectedConns.Store(n) }

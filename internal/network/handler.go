@@ -253,6 +253,9 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 	if err := protocol.ValidateCommand(cmd); err != nil {
 		return &Response{err: err}
 	}
+	if h.metricsCollector != nil {
+		h.metricsCollector.IncrRequests()
+	}
 
 	switch cmd.Name {
 	case "PING":

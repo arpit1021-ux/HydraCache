@@ -3,11 +3,13 @@ package cache
 import (
 	"bytes"
 	"sync"
+	"sync/atomic"
 )
 
 type Store struct {
-	mu      sync.RWMutex
-	entries map[string]*Entry
+	mu       sync.RWMutex
+	entries  map[string]*Entry
+	memBytes atomic.Int64
 }
 
 func NewStore() *Store {
@@ -26,7 +28,11 @@ func (s *Store) Get(key string) (*Entry, bool) {
 func (s *Store) Set(entry *Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if old, exists := s.entries[entry.Key]; exists {
+		s.memBytes.Add(-old.Size)
+	}
 	s.entries[entry.Key] = entry
+	s.memBytes.Add(entry.Size)
 }
 
 func (s *Store) SetNX(entry *Entry) bool {
@@ -36,24 +42,30 @@ func (s *Store) SetNX(entry *Entry) bool {
 		return false
 	}
 	s.entries[entry.Key] = entry
+	s.memBytes.Add(entry.Size)
 	return true
 }
 
 func (s *Store) SetXX(entry *Entry) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.entries[entry.Key]; !exists {
+	old, exists := s.entries[entry.Key]
+	if !exists {
 		return false
 	}
 	s.entries[entry.Key] = entry
+	s.memBytes.Add(entry.Size - old.Size)
 	return true
 }
 
 func (s *Store) Delete(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, existed := s.entries[key]
-	delete(s.entries, key)
+	old, existed := s.entries[key]
+	if existed {
+		s.memBytes.Add(-old.Size)
+		delete(s.entries, key)
+	}
 	return existed
 }
 
@@ -68,6 +80,7 @@ func (s *Store) CompareAndDelete(key string, expected []byte) bool {
 	if !ok || !bytes.Equal(entry.Value, expected) {
 		return false
 	}
+	s.memBytes.Add(-entry.Size)
 	delete(s.entries, key)
 	return true
 }
@@ -95,10 +108,19 @@ func (s *Store) Size() int {
 	return len(s.entries)
 }
 
+// MemoryBytes returns the running total of estimated bytes held by every
+// entry currently in the store (see estimatedSize). Updated incrementally
+// on every mutation rather than recomputed by scanning, so it stays cheap
+// regardless of store size.
+func (s *Store) MemoryBytes() int64 {
+	return s.memBytes.Load()
+}
+
 func (s *Store) Flush() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries = make(map[string]*Entry)
+	s.memBytes.Store(0)
 }
 
 func (s *Store) Range(fn func(key string, entry *Entry) bool) {

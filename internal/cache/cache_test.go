@@ -332,14 +332,21 @@ func TestActiveExpirationShutdown(t *testing.T) {
 
 	time.Sleep(20 * time.Millisecond)
 
-	sizeBefore := c.Size()
 	c.Shutdown()
 
-	// After Shutdown returns the goroutine must have exited.
-	// Verify by checking the size is stable — no more sweeps.
+	// After Shutdown returns, the sweep goroutine must have exited —
+	// verify by checking the size is stable afterward (no further
+	// sweeps happening in the background). Capturing the "before" size
+	// AFTER Shutdown returns, not before calling it, is what actually
+	// isolates "the sweep goroutine stopped" from "the sweeper was
+	// still legitimately running" — capturing it earlier races against
+	// the sweeper's own normal, still-in-progress work between that
+	// snapshot and the Shutdown() call, which made this test flake
+	// under repeated runs even with correct shutdown behavior.
+	sizeAfterShutdown := c.Size()
 	time.Sleep(50 * time.Millisecond)
-	if c.Size() != sizeBefore {
-		t.Errorf("cache size changed after Shutdown: before=%d after=%d", sizeBefore, c.Size())
+	if c.Size() != sizeAfterShutdown {
+		t.Errorf("cache size changed after Shutdown: before=%d after=%d", sizeAfterShutdown, c.Size())
 	}
 }
 
@@ -658,5 +665,225 @@ func TestCompareAndDelete_ConcurrentWritersOnlyOneSurvivesUnaffected(t *testing.
 	}
 	if trueCount != 1 {
 		t.Errorf("expected exactly 1 of %d concurrent CompareAndDelete calls to succeed, got %d", attempts, trueCount)
+	}
+}
+
+// --- Memory-bound enforcement: the audit's headline finding was that
+// EvictionCapacity/EvictionPolicy were configured but never actually
+// enforced anywhere — Store.Set inserted unconditionally, so the cache
+// grew without bound regardless of configuration. These tests prove
+// that's no longer true, for both a real byte budget and entry count.
+
+func noExpiryOpts(policy EvictionPolicy, capacity int, maxBytes int64) *Options {
+	return &Options{
+		EvictionPolicy:   policy,
+		EvictionCapacity: capacity,
+		MaxMemoryBytes:   maxBytes,
+		ActiveExpiration: false,
+	}
+}
+
+func TestLocalCache_MaxMemoryBytesEvictsUnderPressure(t *testing.T) {
+	// Each entry is ~(1+100+64) bytes; budget for ~5 of them.
+	c := New(noExpiryOpts(EvictionLRU, 0, 5*(1+100+entryOverheadBytes)))
+
+	val := make([]byte, 100)
+	for i := 0; i < 50; i++ {
+		c.Set(fmt.Sprintf("%d", i), val, 0)
+	}
+
+	if got := c.MemoryBytes(); got > 5*(1+100+entryOverheadBytes) {
+		t.Errorf("MemoryBytes() = %d, expected to stay under the configured budget", got)
+	}
+	if c.Size() >= 50 {
+		t.Errorf("Size() = %d, expected most of 50 writes to have been evicted", c.Size())
+	}
+	if c.EvictionsCount() == 0 {
+		t.Error("expected EvictionsCount() > 0 once the memory budget was exceeded")
+	}
+}
+
+func TestLocalCache_EvictionCapacityEnforced(t *testing.T) {
+	c := New(noExpiryOpts(EvictionLRU, 5, 0))
+
+	for i := 0; i < 20; i++ {
+		c.Set(fmt.Sprintf("%d", i), []byte("v"), 0)
+	}
+
+	if c.Size() != 5 {
+		t.Errorf("Size() = %d, want exactly 5 (EvictionCapacity)", c.Size())
+	}
+	if c.EvictionsCount() != 15 {
+		t.Errorf("EvictionsCount() = %d, want 15", c.EvictionsCount())
+	}
+}
+
+func TestLocalCache_LRUEvictsLeastRecentlyUsedFirst(t *testing.T) {
+	c := New(noExpiryOpts(EvictionLRU, 3, 0))
+
+	c.Set("a", []byte("1"), 0)
+	c.Set("b", []byte("2"), 0)
+	c.Set("c", []byte("3"), 0)
+
+	// Touch "a" so it's no longer the least-recently-used.
+	c.Get("a")
+
+	c.Set("d", []byte("4"), 0) // must evict "b", the true LRU victim
+
+	if _, err := c.Get("a"); err != nil {
+		t.Error("expected 'a' to survive (recently touched)")
+	}
+	if _, err := c.Get("b"); err == nil {
+		t.Error("expected 'b' to be evicted (least recently used)")
+	}
+	if _, err := c.Get("c"); err != nil {
+		t.Error("expected 'c' to survive")
+	}
+	if _, err := c.Get("d"); err != nil {
+		t.Error("expected 'd' to survive (just inserted)")
+	}
+}
+
+func TestLocalCache_LFUEvictsLeastFrequentlyUsedFirst(t *testing.T) {
+	c := New(noExpiryOpts(EvictionLFU, 3, 0))
+
+	c.Set("a", []byte("1"), 0)
+	c.Set("b", []byte("2"), 0)
+	c.Set("c", []byte("3"), 0)
+
+	c.Get("a")
+	c.Get("a")
+	c.Get("c")
+
+	c.Set("d", []byte("4"), 0) // "b" has the lowest access frequency
+
+	if _, err := c.Get("b"); err == nil {
+		t.Error("expected 'b' to be evicted (least frequently used)")
+	}
+	if _, err := c.Get("a"); err != nil {
+		t.Error("expected 'a' to survive (accessed twice)")
+	}
+	if _, err := c.Get("d"); err != nil {
+		t.Error("expected 'd' to survive (just inserted)")
+	}
+}
+
+func TestLocalCache_NoLimitsConfiguredNeverEvicts(t *testing.T) {
+	c := New(noExpiryOpts(EvictionLRU, 0, 0))
+
+	for i := 0; i < 1000; i++ {
+		c.Set(fmt.Sprintf("%d", i), []byte("v"), 0)
+	}
+
+	if c.Size() != 1000 {
+		t.Errorf("Size() = %d, want 1000 (no bound configured, nothing should be evicted)", c.Size())
+	}
+	if c.EvictionsCount() != 0 {
+		t.Errorf("EvictionsCount() = %d, want 0", c.EvictionsCount())
+	}
+}
+
+func TestLocalCache_FlushResetsMemoryAndEvictionTracking(t *testing.T) {
+	c := New(noExpiryOpts(EvictionLRU, 100, 0))
+	for i := 0; i < 10; i++ {
+		c.Set(fmt.Sprintf("%d", i), []byte("v"), 0)
+	}
+	if c.MemoryBytes() == 0 {
+		t.Fatal("expected nonzero MemoryBytes before Flush")
+	}
+
+	c.Flush()
+
+	if got := c.MemoryBytes(); got != 0 {
+		t.Errorf("MemoryBytes() after Flush = %d, want 0", got)
+	}
+	// The tracker must also be reset — writing fresh entries afterward
+	// should track and evict correctly, not carry stale bookkeeping from
+	// keys that no longer exist in the store.
+	for i := 0; i < 5; i++ {
+		c.Set(fmt.Sprintf("new-%d", i), []byte("v"), 0)
+	}
+	if c.Size() != 5 {
+		t.Errorf("Size() after post-flush writes = %d, want 5", c.Size())
+	}
+}
+
+func TestLocalCache_DeleteUntracksKey(t *testing.T) {
+	c := New(noExpiryOpts(EvictionLRU, 2, 0))
+	c.Set("a", []byte("1"), 0)
+	c.Set("b", []byte("2"), 0)
+	c.Delete("a")
+	c.Set("c", []byte("3"), 0)
+
+	// Capacity is 2; after deleting "a" and adding "c", only "b" and "c"
+	// should remain — "a" being deleted must not leave a phantom
+	// eviction-tracker entry that later gets evicted instead of a real
+	// key, nor should it inflate the count toward evicting "b" or "c"
+	// unnecessarily.
+	if c.Size() != 2 {
+		t.Fatalf("Size() = %d, want 2", c.Size())
+	}
+	if _, err := c.Get("b"); err != nil {
+		t.Error("expected 'b' to survive")
+	}
+	if _, err := c.Get("c"); err != nil {
+		t.Error("expected 'c' to survive")
+	}
+}
+
+func TestStore_MemoryBytesTracksAllMutations(t *testing.T) {
+	s := NewStore()
+	if s.MemoryBytes() != 0 {
+		t.Fatal("expected 0 bytes for an empty store")
+	}
+
+	e1 := NewEntry("k1", []byte("hello"), 0) // size = 2+5+64 = 71
+	s.Set(e1)
+	if got, want := s.MemoryBytes(), e1.Size; got != want {
+		t.Errorf("after Set: MemoryBytes() = %d, want %d", got, want)
+	}
+
+	e1b := NewEntry("k1", []byte("hello world"), 0) // overwrite, longer value
+	s.Set(e1b)
+	if got, want := s.MemoryBytes(), e1b.Size; got != want {
+		t.Errorf("after overwriting Set: MemoryBytes() = %d, want %d", got, want)
+	}
+
+	e2 := NewEntry("k2", []byte("v"), 0)
+	if !s.SetNX(e2) {
+		t.Fatal("SetNX on new key should succeed")
+	}
+	if got, want := s.MemoryBytes(), e1b.Size+e2.Size; got != want {
+		t.Errorf("after SetNX: MemoryBytes() = %d, want %d", got, want)
+	}
+
+	// SetNX on an existing key is a no-op and must not double-count.
+	s.SetNX(NewEntry("k2", []byte("should-not-apply"), 0))
+	if got, want := s.MemoryBytes(), e1b.Size+e2.Size; got != want {
+		t.Errorf("after no-op SetNX: MemoryBytes() = %d, want %d", got, want)
+	}
+
+	e2x := NewEntry("k2", []byte("replaced-via-xx"), 0)
+	if !s.SetXX(e2x) {
+		t.Fatal("SetXX on existing key should succeed")
+	}
+	if got, want := s.MemoryBytes(), e1b.Size+e2x.Size; got != want {
+		t.Errorf("after SetXX: MemoryBytes() = %d, want %d", got, want)
+	}
+
+	s.Delete("k1")
+	if got, want := s.MemoryBytes(), e2x.Size; got != want {
+		t.Errorf("after Delete: MemoryBytes() = %d, want %d", got, want)
+	}
+
+	s.CompareAndDelete("k2", e2x.Value)
+	if got := s.MemoryBytes(); got != 0 {
+		t.Errorf("after CompareAndDelete: MemoryBytes() = %d, want 0", got)
+	}
+
+	s.Set(NewEntry("k3", []byte("v"), 0))
+	s.Flush()
+	if got := s.MemoryBytes(); got != 0 {
+		t.Errorf("after Flush: MemoryBytes() = %d, want 0", got)
 	}
 }

@@ -73,9 +73,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	evictionPolicy, policyErr := cache.EvictionPolicyFromString(cfg.Cache.EvictionPolicy)
+	if policyErr != nil {
+		log.Fatalf("[main] invalid config: %v", policyErr)
+	}
 	localCache := cache.New(&cache.Options{
-		EvictionPolicy:       cache.EvictionLRU,
+		EvictionPolicy:       evictionPolicy,
 		EvictionCapacity:     cfg.Cache.EvictionCapacity,
+		MaxMemoryBytes:       cfg.Cache.MaxMemoryBytes,
 		ActiveExpiration:     cfg.Cache.ActiveExpiration,
 		ExpirationInterval:   cfg.Cache.ExpirationInterval,
 		ExpirationSampleSize: cfg.Cache.ExpirationSampleSize,
@@ -384,6 +389,34 @@ func main() {
 			}
 		}()
 	}
+
+	// --- Periodic metrics refresh ---
+	// Pulls already-accurate totals from the cache, server, and topology
+	// into the Prometheus collector, instead of leaving keys_total,
+	// memory_bytes, evictions_total, hits/misses, connected_connections,
+	// and nodes_alive/nodes_total sitting at a permanent zero — the
+	// collector fields existed and were exported on /metrics, but
+	// nothing ever called their setters.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stats := localCache.Stats()
+				collector.SetKeys(int64(stats.Keys))
+				collector.SetMemory(stats.MemoryBytes)
+				collector.SetHits(stats.Hits)
+				collector.SetMisses(stats.Misses)
+				collector.SetEvictions(stats.Evictions)
+				collector.SetConns(tcpServer.ConnectionCount())
+				collector.SetAliveNodes(int64(topo.AliveCount()))
+				collector.SetTotalNodes(int64(topo.NodeCount()))
+			}
+		}
+	}()
 
 	// --- Wait for signal ---
 	sigCh := make(chan os.Signal, 1)

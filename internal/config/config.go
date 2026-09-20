@@ -45,8 +45,11 @@ type ServerConfig struct {
 }
 
 type CacheConfig struct {
-	EvictionPolicy       string        `yaml:"eviction_policy"`
-	EvictionCapacity     int           `yaml:"eviction_capacity"`
+	EvictionPolicy   string `yaml:"eviction_policy"`
+	EvictionCapacity int    `yaml:"eviction_capacity"`
+	// MaxMemoryBytes bounds total estimated cache memory; 0 means
+	// unlimited. See cache.Options.MaxMemoryBytes.
+	MaxMemoryBytes       int64         `yaml:"max_memory_bytes"`
 	ActiveExpiration     bool          `yaml:"active_expiration"`
 	ExpirationInterval   time.Duration `yaml:"expiration_interval"`
 	ExpirationSampleSize int           `yaml:"expiration_sample_size"`
@@ -116,6 +119,7 @@ func DefaultConfig() *Config {
 		Cache: CacheConfig{
 			EvictionPolicy:         "lru",
 			EvictionCapacity:       100000,
+			MaxMemoryBytes:         256 * 1024 * 1024,
 			ActiveExpiration:       true,
 			ExpirationInterval:     time.Second,
 			ExpirationSampleSize:   10,
