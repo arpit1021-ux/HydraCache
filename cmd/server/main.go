@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -72,6 +73,28 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// --- TLS setup (both must be ready before any dialing/listening) ---
+	var serverTLSConfig *tls.Config
+	if cfg.TLS.Enabled {
+		material := network.TLSMaterial{
+			CertFile:          cfg.TLS.CertFile,
+			KeyFile:           cfg.TLS.KeyFile,
+			CAFile:            cfg.TLS.CAFile,
+			RequireClientCert: cfg.TLS.RequireClientCert,
+		}
+		var err error
+		serverTLSConfig, err = network.BuildServerTLSConfig(material)
+		if err != nil {
+			log.Fatalf("[main] invalid config: %v", err)
+		}
+		clientTLSConfig, err := network.BuildClientTLSConfig(material)
+		if err != nil {
+			log.Fatalf("[main] invalid config: %v", err)
+		}
+		network.SetClientTLSConfig(clientTLSConfig)
+		log.Printf("[main] TLS enabled (mutual=%v)", cfg.TLS.CAFile != "" && cfg.TLS.RequireClientCert)
+	}
 
 	evictionPolicy, policyErr := cache.EvictionPolicyFromString(cfg.Cache.EvictionPolicy)
 	if policyErr != nil {
@@ -226,13 +249,15 @@ func main() {
 	var tcpServer *network.Server
 	if wal != nil {
 		tcpServer = network.NewServerWithWAL(network.ServerConfig{
-			Addr:     cfg.Server.Addr,
-			MaxConns: cfg.Server.MaxConns,
+			Addr:      cfg.Server.Addr,
+			MaxConns:  cfg.Server.MaxConns,
+			TLSConfig: serverTLSConfig,
 		}, localCache, wal)
 	} else {
 		tcpServer = network.NewServer(network.ServerConfig{
-			Addr:     cfg.Server.Addr,
-			MaxConns: cfg.Server.MaxConns,
+			Addr:      cfg.Server.Addr,
+			MaxConns:  cfg.Server.MaxConns,
+			TLSConfig: serverTLSConfig,
 		}, localCache)
 	}
 

@@ -3,6 +3,7 @@ package network
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +23,7 @@ import (
 
 type Server struct {
 	addr         string
+	tlsConfig    *tls.Config
 	listener     net.Listener
 	cache        cache.Cache
 	maxConns     int
@@ -39,6 +41,12 @@ type Server struct {
 type ServerConfig struct {
 	Addr     string
 	MaxConns int
+	// TLSConfig, if set, terminates TLS on this listener — every
+	// connection, client or peer node, must speak TLS to connect at all
+	// (see the AUTH increment's finding: client and inter-node traffic
+	// share one listener in this architecture, so there's one TLS
+	// decision for both, not a separate one per traffic type).
+	TLSConfig *tls.Config
 }
 
 func NewServer(cfg ServerConfig, c cache.Cache) *Server {
@@ -46,12 +54,13 @@ func NewServer(cfg ServerConfig, c cache.Cache) *Server {
 		cfg.MaxConns = 10000
 	}
 	return &Server{
-		addr:     cfg.Addr,
-		cache:    c,
-		maxConns: cfg.MaxConns,
-		sem:      make(chan struct{}, cfg.MaxConns),
-		quit:     make(chan struct{}),
-		handler:  NewHandler(c),
+		addr:      cfg.Addr,
+		tlsConfig: cfg.TLSConfig,
+		cache:     c,
+		maxConns:  cfg.MaxConns,
+		sem:       make(chan struct{}, cfg.MaxConns),
+		quit:      make(chan struct{}),
+		handler:   NewHandler(c),
 	}
 }
 
@@ -60,18 +69,23 @@ func NewServerWithWAL(cfg ServerConfig, c cache.Cache, wal *persistence.WAL) *Se
 		cfg.MaxConns = 10000
 	}
 	return &Server{
-		addr:     cfg.Addr,
-		cache:    c,
-		maxConns: cfg.MaxConns,
-		sem:      make(chan struct{}, cfg.MaxConns),
-		quit:     make(chan struct{}),
-		handler:  NewHandlerWithWAL(c, wal),
+		addr:      cfg.Addr,
+		tlsConfig: cfg.TLSConfig,
+		cache:     c,
+		maxConns:  cfg.MaxConns,
+		sem:       make(chan struct{}, cfg.MaxConns),
+		quit:      make(chan struct{}),
+		handler:   NewHandlerWithWAL(c, wal),
 	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	var err error
-	s.listener, err = net.Listen("tcp", s.addr)
+	if s.tlsConfig != nil {
+		s.listener, err = tls.Listen("tcp", s.addr, s.tlsConfig)
+	} else {
+		s.listener, err = net.Listen("tcp", s.addr)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
 	}

@@ -2,6 +2,7 @@ package network
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -28,7 +29,13 @@ func NewClientWithTimeout(addr string, timeout time.Duration) *Client {
 }
 
 func (c *Client) Connect() error {
-	conn, err := net.DialTimeout("tcp", c.addr, c.timeout)
+	var conn net.Conn
+	var err error
+	if tlsCfg := getClientTLSConfig(); tlsCfg != nil {
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: c.timeout}, "tcp", c.addr, tlsCfg)
+	} else {
+		conn, err = net.DialTimeout("tcp", c.addr, c.timeout)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", c.addr, err)
 	}

@@ -19,6 +19,26 @@ type Config struct {
 	Log     LogConfig     `yaml:"log"`
 	HTTP    HTTPConfig    `yaml:"http"`
 	Auth    AuthConfig    `yaml:"auth"`
+	TLS     TLSConfig     `yaml:"tls"`
+}
+
+// TLSConfig configures TLS for the TCP listener (shared by client and
+// inter-node traffic — see network.ServerConfig.TLSConfig) and for this
+// node's outbound connections to peers. Disabled by default: an existing
+// deployment's config file with no tls section keeps running exactly as
+// before, in plaintext.
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	// CAFile, if set, enables mutual TLS: incoming peer/client
+	// connections are verified against it, and it's trusted when this
+	// node dials out to other nodes presenting certs from the same CA.
+	CAFile string `yaml:"ca_file"`
+	// RequireClientCert makes presenting a valid client certificate
+	// mandatory to connect at all (true mutual TLS), rather than merely
+	// verified when offered. Only meaningful when CAFile is set.
+	RequireClientCert bool `yaml:"require_client_cert"`
 }
 
 // AuthConfig configures per-connection AUTH and ACL enforcement. Disabled
