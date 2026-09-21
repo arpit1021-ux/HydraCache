@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,9 @@ type Server struct {
 	handler      *Handler
 	quit         chan struct{}
 	shutdownOnce sync.Once
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+	maxBulkBytes int
 
 	connsMu sync.Mutex
 	conns   map[net.Conn]struct{}
@@ -47,35 +51,63 @@ type ServerConfig struct {
 	// share one listener in this architecture, so there's one TLS
 	// decision for both, not a separate one per traffic type).
 	TLSConfig *tls.Config
+	// ReadTimeout/WriteTimeout bound how long a connection may sit idle
+	// waiting to send a command or to have its response written,
+	// respectively — a slow or stalled client eventually gets
+	// disconnected rather than holding a connection (and a MaxConns
+	// slot) forever. Default 30s each if unset.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	// MaxBulkBytes bounds a single RESP bulk string's length. Default
+	// protocol.DefaultMaxBulkLen if unset — see NewParserWithLimits for
+	// why this is load-bearing, not just a resource-usage knob.
+	MaxBulkBytes int
 }
 
-func NewServer(cfg ServerConfig, c cache.Cache) *Server {
+func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.MaxConns <= 0 {
 		cfg.MaxConns = 10000
 	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = 30 * time.Second
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = 30 * time.Second
+	}
+	if cfg.MaxBulkBytes <= 0 {
+		cfg.MaxBulkBytes = protocol.DefaultMaxBulkLen
+	}
+}
+
+func NewServer(cfg ServerConfig, c cache.Cache) *Server {
+	applyServerDefaults(&cfg)
 	return &Server{
-		addr:      cfg.Addr,
-		tlsConfig: cfg.TLSConfig,
-		cache:     c,
-		maxConns:  cfg.MaxConns,
-		sem:       make(chan struct{}, cfg.MaxConns),
-		quit:      make(chan struct{}),
-		handler:   NewHandler(c),
+		addr:         cfg.Addr,
+		tlsConfig:    cfg.TLSConfig,
+		cache:        c,
+		maxConns:     cfg.MaxConns,
+		sem:          make(chan struct{}, cfg.MaxConns),
+		quit:         make(chan struct{}),
+		handler:      NewHandler(c),
+		readTimeout:  cfg.ReadTimeout,
+		writeTimeout: cfg.WriteTimeout,
+		maxBulkBytes: cfg.MaxBulkBytes,
 	}
 }
 
 func NewServerWithWAL(cfg ServerConfig, c cache.Cache, wal *persistence.WAL) *Server {
-	if cfg.MaxConns <= 0 {
-		cfg.MaxConns = 10000
-	}
+	applyServerDefaults(&cfg)
 	return &Server{
-		addr:      cfg.Addr,
-		tlsConfig: cfg.TLSConfig,
-		cache:     c,
-		maxConns:  cfg.MaxConns,
-		sem:       make(chan struct{}, cfg.MaxConns),
-		quit:      make(chan struct{}),
-		handler:   NewHandlerWithWAL(c, wal),
+		addr:         cfg.Addr,
+		tlsConfig:    cfg.TLSConfig,
+		cache:        c,
+		maxConns:     cfg.MaxConns,
+		sem:          make(chan struct{}, cfg.MaxConns),
+		quit:         make(chan struct{}),
+		handler:      NewHandlerWithWAL(c, wal),
+		readTimeout:  cfg.ReadTimeout,
+		writeTimeout: cfg.WriteTimeout,
+		maxBulkBytes: cfg.MaxBulkBytes,
 	}
 }
 
@@ -94,16 +126,30 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// acceptLoop reserves a semaphore slot BEFORE calling Accept, not after —
+// this is what makes MaxConns an actual admission-control bound rather
+// than a formality. The previous version accepted every inbound TCP
+// connection unconditionally (spawning a goroutine and consuming a file
+// descriptor for each) and only checked the semaphore inside
+// handleConnection; past MaxConns, excess connections were still fully
+// accepted and just sat blocked forever, so an attacker opening far more
+// connections than MaxConns could still exhaust file descriptors and
+// goroutine memory — the exact resource-exhaustion MaxConns exists to
+// prevent. Reserving the slot first means Accept is only called once
+// capacity is actually available; anything beyond that queues in the
+// kernel's listen backlog (bounded, OS-managed) instead of user space.
 func (s *Server) acceptLoop(ctx context.Context) {
 	defer s.wg.Done()
 	for {
 		select {
+		case s.sem <- struct{}{}:
 		case <-s.quit:
 			return
-		default:
 		}
+
 		conn, err := s.listener.Accept()
 		if err != nil {
+			<-s.sem
 			select {
 			case <-s.quit:
 				return
@@ -119,6 +165,17 @@ func (s *Server) acceptLoop(ctx context.Context) {
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
+	defer func() { <-s.sem }() // release the slot acceptLoop reserved
+
+	// A panic anywhere in this connection's request handling (parser,
+	// dispatch, a bug in a command handler) must never take down the
+	// whole process over one client's bad input or an edge case this
+	// code didn't anticipate — it drops this one connection instead.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[network] recovered from panic handling connection from %s: %v", conn.RemoteAddr(), r)
+		}
+	}()
 
 	s.trackConn(conn)
 	defer s.untrackConn(conn)
@@ -126,17 +183,12 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	s.connCount.Add(1)
 	defer s.connCount.Add(-1)
 
-	s.sem <- struct{}{}
-	defer func() { <-s.sem }()
-
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 64*1024)
 
-	parser := protocol.NewParser(reader)
+	parser := protocol.NewParserWithLimits(reader, s.maxBulkBytes, protocol.DefaultMaxArrayLen)
 	encoder := protocol.NewEncoder(writer)
 	sess := &Session{}
-
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Minute))
 
 	for {
 		select {
@@ -147,17 +199,18 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		default:
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
+		_ = conn.SetReadDeadline(time.Now().Add(s.readTimeout))
 		cmd, err := parser.ReadCommand()
 		if err != nil {
 			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 				_ = encoder.WriteError(err.Error())
 				_ = writer.Flush()
 			}
 			return
 		}
 
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Minute))
+		_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 		response := s.handler.HandleAuthenticated(cmd, sess)
 		if err := response.WriteTo(encoder); err != nil {
 			return

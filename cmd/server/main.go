@@ -249,15 +249,21 @@ func main() {
 	var tcpServer *network.Server
 	if wal != nil {
 		tcpServer = network.NewServerWithWAL(network.ServerConfig{
-			Addr:      cfg.Server.Addr,
-			MaxConns:  cfg.Server.MaxConns,
-			TLSConfig: serverTLSConfig,
+			Addr:         cfg.Server.Addr,
+			MaxConns:     cfg.Server.MaxConns,
+			TLSConfig:    serverTLSConfig,
+			ReadTimeout:  cfg.Server.ReadTimeout,
+			WriteTimeout: cfg.Server.WriteTimeout,
+			MaxBulkBytes: cfg.Server.MaxBulkBytes,
 		}, localCache, wal)
 	} else {
 		tcpServer = network.NewServer(network.ServerConfig{
-			Addr:      cfg.Server.Addr,
-			MaxConns:  cfg.Server.MaxConns,
-			TLSConfig: serverTLSConfig,
+			Addr:         cfg.Server.Addr,
+			MaxConns:     cfg.Server.MaxConns,
+			TLSConfig:    serverTLSConfig,
+			ReadTimeout:  cfg.Server.ReadTimeout,
+			WriteTimeout: cfg.Server.WriteTimeout,
+			MaxBulkBytes: cfg.Server.MaxBulkBytes,
 		}, localCache)
 	}
 

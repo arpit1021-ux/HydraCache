@@ -62,6 +62,9 @@ type ServerConfig struct {
 	MaxConns     int           `yaml:"max_conns"`
 	ReadTimeout  time.Duration `yaml:"read_timeout"`
 	WriteTimeout time.Duration `yaml:"write_timeout"`
+	// MaxBulkBytes bounds a single RESP bulk string's length; 0 uses
+	// protocol.DefaultMaxBulkLen (512MB). See network.ServerConfig.MaxBulkBytes.
+	MaxBulkBytes int `yaml:"max_bulk_bytes"`
 }
 
 type CacheConfig struct {
