@@ -370,3 +370,53 @@ func TestMinorityPartition_NeverElectsAlone(t *testing.T) {
 		t.Fatal("majority side (4 of 5) failed to elect a leader while one node was isolated")
 	}
 }
+
+func TestResign_NoOpWhenNotLeader(t *testing.T) {
+	e, err := New(testCfg("node-1", noopTransport{}, noPeers))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fired := false
+	e.OnLoseLeadership(func() { fired = true })
+
+	e.Resign() // never became leader
+
+	if fired {
+		t.Error("expected OnLoseLeadership not to fire when Resign is called on a non-leader")
+	}
+	if e.State() != StateFollower {
+		t.Errorf("expected state to remain Follower, got %v", e.State())
+	}
+}
+
+func TestResign_StepsDownAndFiresCallbackWhenLeader(t *testing.T) {
+	// Force leader state directly (as TestHandleHeartbeat_DemotesLeaderAndFiresCallback
+	// does above) rather than starting the ticking election loop — a solo
+	// node with no peers would just re-elect itself again within one
+	// electionTimeout, racing the very assertion this test makes.
+	e, err := New(testCfg("solo", noopTransport{}, noPeers))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.state = StateLeader
+	e.term = 7
+	e.mu.Unlock()
+
+	lost := make(chan struct{}, 1)
+	e.OnLoseLeadership(func() { lost <- struct{}{} })
+
+	e.Resign()
+
+	select {
+	case <-lost:
+	case <-time.After(time.Second):
+		t.Fatal("expected OnLoseLeadership to fire after Resign")
+	}
+	if e.IsLeader() {
+		t.Error("expected IsLeader() false immediately after Resign")
+	}
+	if e.Term() != 7 {
+		t.Errorf("expected Resign not to bump the term (newTerm=0 means no change), got %d want 7", e.Term())
+	}
+}

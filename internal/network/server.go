@@ -221,17 +221,48 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// Shutdown stops accepting connections and waits for in-flight ones to
-// finish. Safe to call more than once (e.g. an explicit Shutdown in a
-// test followed by a deferred/cleanup one) — later calls are no-ops.
+// defaultDrainTimeout bounds how long Shutdown waits for in-flight
+// connections to finish on their own before forcibly closing whatever's
+// left.
+const defaultDrainTimeout = 5 * time.Second
+
+// Shutdown stops accepting connections and gives in-flight ones up to
+// defaultDrainTimeout to finish on their own before forcibly closing any
+// that remain. Safe to call more than once (e.g. an explicit Shutdown in
+// a test followed by a deferred/cleanup one) — later calls are no-ops.
 func (s *Server) Shutdown() {
+	s.ShutdownWithTimeout(defaultDrainTimeout)
+}
+
+// ShutdownWithTimeout is Shutdown with an explicit drain timeout. Without
+// a bound, a single idle connection sitting in a blocking read would make
+// shutdown wait for however long its ReadTimeout happens to be (up to
+// 30s by default, or longer if configured) before returning — this makes
+// shutdown's own duration predictable regardless of what any given
+// connection is doing.
+func (s *Server) ShutdownWithTimeout(drainTimeout time.Duration) {
 	s.shutdownOnce.Do(func() {
 		close(s.quit)
 		if s.listener != nil {
 			s.listener.Close()
 		}
 	})
-	s.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-time.After(drainTimeout):
+		log.Printf("[network] drain timeout (%v) exceeded, force-closing %d remaining connection(s)",
+			drainTimeout, s.ConnectionCount())
+		s.CloseAllConnections()
+		<-done
+	}
 }
 
 func (s *Server) trackConn(conn net.Conn) {

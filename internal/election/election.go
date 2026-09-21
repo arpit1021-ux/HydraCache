@@ -600,6 +600,21 @@ func (e *Election) Stop() {
 	e.wg.Wait()
 }
 
+// Resign immediately steps down from leadership if this node currently
+// holds it, firing OnLoseLeadership right away instead of leaving
+// dependent state (e.g. this node's advertised role in the cluster
+// topology) stale until a lease timeout expires or a peer's heartbeat
+// eventually reveals the term changed. Intended for graceful shutdown: a
+// node that's about to exit shouldn't keep being advertised as leader for
+// however long is left before the process actually stops. No-op if this
+// node isn't currently leader.
+func (e *Election) Resign() {
+	if !e.IsLeader() {
+		return
+	}
+	e.stepDown("graceful resignation", 0)
+}
+
 func shortID(id string) string {
 	if len(id) > 8 {
 		return id[:8]

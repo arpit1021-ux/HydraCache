@@ -175,3 +175,62 @@ func TestServer_MaxConnsThrottlesAcceptance(t *testing.T) {
 		t.Errorf("connB response = %q, want +PONG\\r\\n", buf)
 	}
 }
+
+// TestServer_ShutdownWithTimeout_ForceClosesStuckIdleConnection proves
+// Shutdown is bounded: an idle connection sitting in a blocking read
+// (with a long ReadTimeout, simulating a real deployment) must not make
+// Shutdown wait for that timeout to elapse — it gets force-closed once
+// the drain grace period passes, so shutdown's own duration is
+// predictable regardless of what a connection happens to be doing.
+func TestServer_ShutdownWithTimeout_ForceClosesStuckIdleConnection(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		Addr:         "127.0.0.1:0",
+		MaxConns:     10,
+		ReadTimeout:  time.Minute, // deliberately much longer than the drain timeout below
+		WriteTimeout: time.Minute,
+	}, newTestCache())
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && srv.ConnectionCount() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if srv.ConnectionCount() != 1 {
+		t.Fatalf("expected the idle connection to be accepted, ConnectionCount()=%d", srv.ConnectionCount())
+	}
+
+	start := time.Now()
+	srv.ShutdownWithTimeout(200 * time.Millisecond)
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("Shutdown took %v — expected it to be bounded by the drain timeout, not the connection's 1-minute ReadTimeout", elapsed)
+	}
+}
+
+// TestServer_ShutdownWithTimeout_ReturnsPromptlyWithNoStuckConnections is
+// a regression guard: when every connection is already idle-but-closable
+// (or there are none), Shutdown must return quickly rather than always
+// waiting out the full drain timeout.
+func TestServer_ShutdownWithTimeout_ReturnsPromptlyWithNoStuckConnections(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", MaxConns: 10}, newTestCache())
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	start := time.Now()
+	srv.ShutdownWithTimeout(5 * time.Second)
+	elapsed := time.Since(start)
+
+	if elapsed > time.Second {
+		t.Errorf("Shutdown with no connections took %v — expected it to return promptly, not wait out the drain timeout", elapsed)
+	}
+}

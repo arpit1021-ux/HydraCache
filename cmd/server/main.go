@@ -457,12 +457,18 @@ func main() {
 	log.Println("[hydracache] shutting down...")
 
 	// Shutdown order:
-	// 1. Stop accepting new connections (cancel ctx + close server)
-	// 2. Stop snapshot timer
-	// 3. Final snapshot + truncate WAL
-	// 4. Close WAL (sync + close file)
-	// 5. Stop cluster components
-	// 6. Stop cache background goroutines
+	// 1. Hand off leadership if held (resign now, not whenever a lease
+	//    timeout or peer eventually notices this node went quiet)
+	// 2. Stop accepting new connections (cancel ctx + drain + close server)
+	// 3. Stop snapshot timer
+	// 4. Final snapshot + truncate WAL
+	// 5. Close WAL (sync + close file)
+	// 6. Stop cluster components
+	// 7. Stop cache background goroutines
+	if elect.IsLeader() {
+		log.Printf("[main] resigning cluster-coordinator role for graceful shutdown")
+	}
+	elect.Resign()
 	cancel()
 	elect.Stop()
 	tcpServer.Shutdown()
