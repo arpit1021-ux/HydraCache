@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -63,7 +64,7 @@ func main() {
 	}
 
 	logger := logging.New(cfg.Log.Level, cfg.Log.Format, cfg.Log.Output)
-	_ = logger
+	slog.SetDefault(logger)
 
 	if cfg.Cluster.NodeID == "" {
 		cfg.Cluster.NodeID = generateShortID()
@@ -255,6 +256,7 @@ func main() {
 			ReadTimeout:  cfg.Server.ReadTimeout,
 			WriteTimeout: cfg.Server.WriteTimeout,
 			MaxBulkBytes: cfg.Server.MaxBulkBytes,
+			Logger:       logger,
 		}, localCache, wal)
 	} else {
 		tcpServer = network.NewServer(network.ServerConfig{
@@ -264,6 +266,7 @@ func main() {
 			ReadTimeout:  cfg.Server.ReadTimeout,
 			WriteTimeout: cfg.Server.WriteTimeout,
 			MaxBulkBytes: cfg.Server.MaxBulkBytes,
+			Logger:       logger,
 		}, localCache)
 	}
 

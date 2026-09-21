@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -37,6 +37,8 @@ type Server struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	maxBulkBytes int
+	logger       *slog.Logger
+	nextConnID   atomic.Uint64
 
 	connsMu sync.Mutex
 	conns   map[net.Conn]struct{}
@@ -62,11 +64,19 @@ type ServerConfig struct {
 	// protocol.DefaultMaxBulkLen if unset — see NewParserWithLimits for
 	// why this is load-bearing, not just a resource-usage knob.
 	MaxBulkBytes int
+	// Logger receives structured, per-connection log events (accepted,
+	// closed, protocol error, recovered panic), each tagged with a
+	// conn_id so every line from one connection's lifetime can be
+	// correlated in a log aggregator. Defaults to slog.Default() if nil.
+	Logger *slog.Logger
 }
 
 func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.MaxConns <= 0 {
 		cfg.MaxConns = 10000
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = 30 * time.Second
@@ -92,6 +102,7 @@ func NewServer(cfg ServerConfig, c cache.Cache) *Server {
 		readTimeout:  cfg.ReadTimeout,
 		writeTimeout: cfg.WriteTimeout,
 		maxBulkBytes: cfg.MaxBulkBytes,
+		logger:       cfg.Logger,
 	}
 }
 
@@ -108,6 +119,7 @@ func NewServerWithWAL(cfg ServerConfig, c cache.Cache, wal *persistence.WAL) *Se
 		readTimeout:  cfg.ReadTimeout,
 		writeTimeout: cfg.WriteTimeout,
 		maxBulkBytes: cfg.MaxBulkBytes,
+		logger:       cfg.Logger,
 	}
 }
 
@@ -167,13 +179,21 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	defer func() { <-s.sem }() // release the slot acceptLoop reserved
 
+	// A unique ID for this connection's lifetime, attached to every log
+	// line it produces — the "request ID" that lets an operator grep a
+	// log aggregator for one client's full command sequence instead of
+	// an undifferentiated stream from every connection interleaved
+	// together.
+	connID := s.nextConnID.Add(1)
+	connLog := s.logger.With("conn_id", connID, "remote_addr", conn.RemoteAddr().String())
+
 	// A panic anywhere in this connection's request handling (parser,
 	// dispatch, a bug in a command handler) must never take down the
 	// whole process over one client's bad input or an edge case this
 	// code didn't anticipate — it drops this one connection instead.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[network] recovered from panic handling connection from %s: %v", conn.RemoteAddr(), r)
+			connLog.Error("recovered from panic handling connection", "panic", r)
 		}
 	}()
 
@@ -182,6 +202,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	s.connCount.Add(1)
 	defer s.connCount.Add(-1)
+
+	connLog.Debug("connection accepted")
+	defer connLog.Debug("connection closed")
 
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 64*1024)
@@ -203,6 +226,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		cmd, err := parser.ReadCommand()
 		if err != nil {
 			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				connLog.Warn("protocol error, closing connection", "error", err)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 				_ = encoder.WriteError(err.Error())
 				_ = writer.Flush()
@@ -212,6 +236,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 		_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 		response := s.handler.HandleAuthenticated(cmd, sess)
+		if response.err != nil {
+			connLog.Debug("command failed", "command", cmd.Name, "error", response.err)
+		}
 		if err := response.WriteTo(encoder); err != nil {
 			return
 		}
@@ -258,8 +285,8 @@ func (s *Server) ShutdownWithTimeout(drainTimeout time.Duration) {
 	case <-done:
 		return
 	case <-time.After(drainTimeout):
-		log.Printf("[network] drain timeout (%v) exceeded, force-closing %d remaining connection(s)",
-			drainTimeout, s.ConnectionCount())
+		s.logger.Warn("drain timeout exceeded, force-closing remaining connections",
+			"drain_timeout", drainTimeout, "remaining_connections", s.ConnectionCount())
 		s.CloseAllConnections()
 		<-done
 	}

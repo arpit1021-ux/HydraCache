@@ -1,9 +1,14 @@
 package network
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -233,4 +238,89 @@ func TestServer_ShutdownWithTimeout_ReturnsPromptlyWithNoStuckConnections(t *tes
 	if elapsed > time.Second {
 		t.Errorf("Shutdown with no connections took %v — expected it to return promptly, not wait out the drain timeout", elapsed)
 	}
+}
+
+// TestServer_StructuredLoggingIncludesDistinctConnIDs proves the
+// per-connection "request ID" actually works end to end: each
+// connection's log lines carry a conn_id attribute, real JSON (not just
+// a differently-shaped text line — the same class of bug the logging
+// package rewrite fixed), and two different connections get two
+// different IDs so their log lines can be told apart in an aggregator.
+func TestServer_StructuredLoggingIncludesDistinctConnIDs(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	logger := slog.New(slog.NewJSONHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", MaxConns: 10, Logger: logger}, newTestCache())
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(srv.Shutdown)
+
+	addr := srv.Addr().String()
+
+	client1 := NewClient(addr)
+	if err := client1.Connect(); err != nil {
+		t.Fatalf("connect1: %v", err)
+	}
+	if _, err := client1.Send("PING"); err != nil {
+		t.Fatalf("PING1: %v", err)
+	}
+	client1.Close()
+
+	client2 := NewClient(addr)
+	if err := client2.Connect(); err != nil {
+		t.Fatalf("connect2: %v", err)
+	}
+	if _, err := client2.Send("PING"); err != nil {
+		t.Fatalf("PING2: %v", err)
+	}
+	client2.Close()
+
+	// Give the "connection closed" debug lines a moment to be written.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := strings.Count(buf.String(), "conn_id")
+		mu.Unlock()
+		if n >= 4 { // 2 connections x (accepted, closed)
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mu.Lock()
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	mu.Unlock()
+
+	connIDs := map[float64]bool{}
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+			t.Fatalf("expected every log line to be valid JSON, got %q: %v", line, err)
+		}
+		if id, ok := decoded["conn_id"]; ok {
+			connIDs[id.(float64)] = true
+		}
+	}
+	if len(connIDs) != 2 {
+		t.Errorf("expected 2 distinct conn_id values across 2 connections, got %d: %v", len(connIDs), connIDs)
+	}
+}
+
+// lockedWriter serializes writes from concurrent connection-handling
+// goroutines into a shared buffer, since bytes.Buffer itself isn't
+// safe for concurrent use.
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
 }
