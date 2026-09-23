@@ -74,9 +74,24 @@ type Handler struct {
 type Session struct {
 	authenticated bool
 	username      string
+
+	// id and addr are stamped by the Server when the connection is
+	// accepted and never change for the connection's lifetime. name,
+	// libName and libVer are set by the client via CLIENT SETNAME /
+	// CLIENT SETINFO / HELLO SETNAME and default to "" until then.
+	id      uint64
+	addr    string
+	name    string
+	libName string
+	libVer  string
 }
 
 const defaultAuthUsername = "default"
+
+// hydraCacheVersion is reported by HELLO and INFO. It identifies this
+// server as HydraCache, not Redis — HELLO's "server" field is honest
+// about what actually answered the connection.
+const hydraCacheVersion = "1.0.0"
 
 // GossipHandler processes GOSSIP commands. Set via SetGossip after construction.
 type GossipHandler interface {
@@ -165,10 +180,12 @@ func (h *Handler) SetAuth(acl *auth.ACL) {
 // connection (as opposed to internal dispatch — replicated-op application,
 // election/gossip RPCs — which call Handle directly and are never subject
 // to client ACL checks, since those are inter-node, not client-facing).
-// When no ACL is configured (SetAuth never called), it behaves exactly
-// like Handle.
+// AUTH, HELLO and CLIENT are always handled here directly (never reach
+// Handle's switch) because they need access to the per-connection Session;
+// when no ACL is configured (SetAuth never called) every other command
+// passes straight through to Handle unchecked.
 func (h *Handler) HandleAuthenticated(cmd *protocol.Command, sess *Session) *Response {
-	if h.acl == nil || isInterNodeCommand(cmd.Name) {
+	if isInterNodeCommand(cmd.Name) {
 		// Inter-node RPCs (gossip, replication, election) arrive over the
 		// same listener as client connections, but a peer node never
 		// sends AUTH — client ACL is the wrong control for them. Node-to-
@@ -180,11 +197,31 @@ func (h *Handler) HandleAuthenticated(cmd *protocol.Command, sess *Session) *Res
 		return h.Handle(cmd)
 	}
 
-	if cmd.Name == "AUTH" {
+	// AUTH and HELLO (which can carry an inline AUTH clause) must be
+	// reachable before the session is authenticated — that's the whole
+	// point of a login command — regardless of whether ACL is configured
+	// at all, so a client always gets an honest reply instead of falling
+	// through to "unknown command".
+	switch cmd.Name {
+	case "AUTH":
 		return h.handleAuth(cmd, sess)
+	case "HELLO":
+		return h.handleHello(cmd, sess)
 	}
+
+	if h.acl == nil {
+		if cmd.Name == "CLIENT" {
+			return h.handleClient(cmd, sess)
+		}
+		return h.Handle(cmd)
+	}
+
 	if !sess.authenticated {
 		return &Response{err: fmt.Errorf("NOAUTH Authentication required")}
+	}
+
+	if cmd.Name == "CLIENT" {
+		return h.handleClient(cmd, sess)
 	}
 
 	keys := commandKeys(cmd)
@@ -203,6 +240,10 @@ func (h *Handler) HandleAuthenticated(cmd *protocol.Command, sess *Session) *Res
 }
 
 func (h *Handler) handleAuth(cmd *protocol.Command, sess *Session) *Response {
+	if h.acl == nil {
+		return &Response{err: fmt.Errorf("ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?")}
+	}
+
 	var username, password string
 	switch len(cmd.Args) {
 	case 1:
@@ -210,7 +251,7 @@ func (h *Handler) handleAuth(cmd *protocol.Command, sess *Session) *Response {
 	case 2:
 		username, password = cmd.Args[0], cmd.Args[1]
 	default:
-		return &Response{err: fmt.Errorf("wrong number of arguments for 'auth' command")}
+		return &Response{err: fmt.Errorf("ERR wrong number of arguments for 'auth' command")}
 	}
 
 	if !h.acl.Authenticate(username, password) {
@@ -221,6 +262,144 @@ func (h *Handler) handleAuth(cmd *protocol.Command, sess *Session) *Response {
 	sess.authenticated = true
 	sess.username = username
 	return &Response{data: []byte("+OK\r\n")}
+}
+
+// isHelloKeyword reports whether s is a HELLO sub-option keyword rather
+// than a protocol version, so HELLO AUTH ... (protover omitted, meaning
+// "keep whatever's negotiated, just authenticate") can be told apart from
+// HELLO 2 AUTH ....
+func isHelloKeyword(s string) bool {
+	return strings.EqualFold(s, "AUTH") || strings.EqualFold(s, "SETNAME")
+}
+
+// handleHello implements HELLO [protover [AUTH username password]
+// [SETNAME clientname]], matching real Redis's syntax and error strings so
+// clients that probe capability on connect (go-redis, redis-cli) degrade
+// gracefully. HydraCache only ever speaks RESP2 on the wire — nulls,
+// booleans, maps, doubles and the other RESP3-only types are not
+// implemented — so protover 3 is honestly rejected with the same NOPROTO
+// error real Redis returns for a version it doesn't support, rather than
+// claiming RESP3 and then encoding replies incorrectly.
+func (h *Handler) handleHello(cmd *protocol.Command, sess *Session) *Response {
+	args := cmd.Args
+	i := 0
+	if len(args) > 0 && !isHelloKeyword(args[0]) {
+		switch args[0] {
+		case "3":
+			return &Response{err: fmt.Errorf("NOPROTO unsupported protocol version")}
+		case "2":
+		default:
+			return &Response{err: fmt.Errorf("NOPROTO unsupported protocol version")}
+		}
+		i = 1
+	}
+
+	for i < len(args) {
+		switch strings.ToUpper(args[i]) {
+		case "AUTH":
+			if i+2 >= len(args) {
+				return &Response{err: fmt.Errorf("ERR syntax error in HELLO")}
+			}
+			if h.acl != nil {
+				username, password := args[i+1], args[i+2]
+				if !h.acl.Authenticate(username, password) {
+					return &Response{err: fmt.Errorf("WRONGPASS invalid username-password pair or user is disabled")}
+				}
+				sess.authenticated = true
+				sess.username = username
+			}
+			i += 3
+		case "SETNAME":
+			if i+1 >= len(args) {
+				return &Response{err: fmt.Errorf("ERR syntax error in HELLO")}
+			}
+			if strings.ContainsAny(args[i+1], " \n") {
+				return &Response{err: fmt.Errorf("ERR Client names cannot contain spaces, newlines or special characters.")}
+			}
+			sess.name = args[i+1]
+			i += 2
+		default:
+			return &Response{err: fmt.Errorf("ERR syntax error in HELLO")}
+		}
+	}
+
+	if h.acl != nil && !sess.authenticated {
+		return &Response{err: fmt.Errorf("NOAUTH HELLO must be called with the client already authenticated, otherwise the HELLO <proto> AUTH <user> <pass> option can be used to authenticate the client and select the RESP protocol version at the same time")}
+	}
+
+	role := "master"
+	if h.election != nil && !h.election.IsLeader() {
+		role = "replica"
+	}
+
+	fields := [][2]string{
+		{"server", "hydracache"},
+		{"version", hydraCacheVersion},
+		{"mode", "standalone"},
+		{"role", role},
+	}
+	// 2 array elements per string field, plus proto (2), id (2) and
+	// modules (2: the key plus an empty array) — we ship no modules.
+	elemCount := len(fields)*2 + 6
+	buf := fmt.Appendf(nil, "*%d\r\n", elemCount)
+	for _, kv := range fields {
+		buf = fmt.Appendf(buf, "$%d\r\n%s\r\n$%d\r\n%s\r\n", len(kv[0]), kv[0], len(kv[1]), kv[1])
+	}
+	buf = fmt.Appendf(buf, "$5\r\nproto\r\n:2\r\n")
+	buf = fmt.Appendf(buf, "$2\r\nid\r\n:%d\r\n", sess.id)
+	buf = fmt.Appendf(buf, "$7\r\nmodules\r\n*0\r\n")
+	return &Response{data: buf}
+}
+
+// handleClient implements the subset of CLIENT that a per-connection
+// Session can honestly answer: identity (GETNAME/SETNAME/ID/INFO) and the
+// SETINFO calls go-redis and other modern clients send unconditionally
+// on connect. Subcommands with no real backing capability here — LIST,
+// KILL, PAUSE, UNPAUSE, NO-EVICT, NO-TOUCH, REPLY — are deliberately not
+// implemented as no-ops (a no-op claiming success for something the
+// server doesn't actually track would be exactly the kind of untested,
+// fabricated capability this codebase avoids) and fall through to the
+// unknown-subcommand error instead, which every client we've checked
+// tolerates on optional startup commands.
+func (h *Handler) handleClient(cmd *protocol.Command, sess *Session) *Response {
+	if len(cmd.Args) == 0 {
+		return &Response{err: fmt.Errorf("ERR wrong number of arguments for 'client' command")}
+	}
+	sub := strings.ToUpper(cmd.Args[0])
+	switch sub {
+	case "GETNAME":
+		return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(sess.name), sess.name)}
+	case "SETNAME":
+		if len(cmd.Args) != 2 {
+			return &Response{err: fmt.Errorf("ERR wrong number of arguments for 'client|setname' command")}
+		}
+		if strings.ContainsAny(cmd.Args[1], " \n") {
+			return &Response{err: fmt.Errorf("ERR Client names cannot contain spaces, newlines or special characters.")}
+		}
+		sess.name = cmd.Args[1]
+		return &Response{data: []byte("+OK\r\n")}
+	case "ID":
+		return &Response{data: fmt.Appendf(nil, ":%d\r\n", sess.id)}
+	case "SETINFO":
+		if len(cmd.Args) != 3 {
+			return &Response{err: fmt.Errorf("ERR wrong number of arguments for 'client|setinfo' command")}
+		}
+		switch strings.ToLower(cmd.Args[1]) {
+		case "lib-name":
+			sess.libName = cmd.Args[2]
+		case "lib-ver":
+			sess.libVer = cmd.Args[2]
+		default:
+			return &Response{err: fmt.Errorf("ERR Unrecognized option '%s'", cmd.Args[1])}
+		}
+		return &Response{data: []byte("+OK\r\n")}
+	case "INFO":
+		info := fmt.Sprintf("id=%d addr=%s name=%s lib-name=%s lib-ver=%s resp=2",
+			sess.id, sess.addr, sess.name, sess.libName, sess.libVer)
+		return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(info), info)}
+	default:
+		return &Response{err: fmt.Errorf("ERR unknown subcommand or wrong number of arguments for '%s'. Try CLIENT HELP.", cmd.Args[0])}
+	}
 }
 
 // isInterNodeCommand reports whether name is a server-to-server RPC
@@ -239,7 +418,7 @@ func isInterNodeCommand(name string) bool {
 // and are gated by command permission alone.
 func commandKeys(cmd *protocol.Command) []string {
 	switch cmd.Name {
-	case "GET", "TTL", "PTTL", "PERSIST", "EXPIRE", "SET":
+	case "GET", "TTL", "PTTL", "PERSIST", "EXPIRE", "SET", "SETNX":
 		if len(cmd.Args) > 0 {
 			return cmd.Args[:1]
 		}
@@ -262,6 +441,8 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 		return h.handlePing(cmd)
 	case "SET":
 		return h.handleSet(cmd)
+	case "SETNX":
+		return h.handleSetNX(cmd)
 	case "GET":
 		return h.handleGet(cmd)
 	case "DEL":
@@ -284,6 +465,8 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 		return h.handleFlushAll(cmd)
 	case "INFO":
 		return h.handleInfo(cmd)
+	case "CLUSTER":
+		return h.handleCluster(cmd)
 	case "GOSSIP":
 		return h.handleGossip(cmd)
 	case "REPLICATE":
@@ -295,7 +478,7 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 	case "ELECTION_HEARTBEAT":
 		return h.handleElectionHeartbeat(cmd)
 	default:
-		return &Response{err: fmt.Errorf("unknown command '%s'", cmd.Name)}
+		return &Response{err: fmt.Errorf("ERR unknown command '%s'", cmd.Name)}
 	}
 }
 
@@ -345,10 +528,10 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 		}
 		if err := h.walAppend("SET", cmd.Args, key, val, ttlNano); err != nil {
 			_, _ = h.cache.Delete(key)
-			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+			return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 		}
 		if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-			return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+			return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 		}
 		return &Response{data: []byte("+OK\r\n")}
 	}
@@ -370,25 +553,43 @@ func (h *Handler) handleSet(cmd *protocol.Command) *Response {
 			} else {
 				_, _ = h.cache.Delete(key)
 			}
-			return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+			return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 		}
 		if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-			return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+			return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 		}
 		return &Response{data: []byte("+OK\r\n")}
 	}
 
 	// --- Unconditional SET: WAL first, then mutate. Cache untouched if WAL fails. ---
 	if err := h.walAppend("SET", cmd.Args, key, val, ttlNano); err != nil {
-		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+		return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 	}
 	if err := h.cache.Set(key, val, ttl); err != nil {
 		return &Response{err: err}
 	}
 	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 	}
 	return &Response{data: []byte("+OK\r\n")}
+}
+
+// handleSetNX implements the classic two-argument Redis SETNX command
+// (distinct from SET key value NX): "set key to value only if key doesn't
+// already exist," replying with an integer (1 set / 0 not set) rather than
+// SET's simple-string-or-nil reply. It's a thin wrapper around handleSet's
+// existing NX path — reusing its WAL/rollback/replication logic exactly —
+// that only translates the reply encoding, so there's no duplicated
+// conditional-write logic to keep in sync.
+func (h *Handler) handleSetNX(cmd *protocol.Command) *Response {
+	resp := h.handleSet(&protocol.Command{Name: "SET", Args: []string{cmd.Args[0], cmd.Args[1], "NX"}})
+	if resp.err != nil {
+		return resp
+	}
+	if string(resp.data) == "$-1\r\n" {
+		return &Response{data: []byte(":0\r\n")}
+	}
+	return &Response{data: []byte(":1\r\n")}
 }
 
 func (h *Handler) handleGet(cmd *protocol.Command) *Response {
@@ -447,7 +648,7 @@ func (h *Handler) handleDel(cmd *protocol.Command) *Response {
 	// WAL first for the unconditional DEL command. If WAL fails, the
 	// keys remain in the cache — no mutation has occurred yet.
 	if err := h.walAppend("DEL", cmd.Args, "", nil, 0); err != nil {
-		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+		return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 	}
 	count := 0
 	for _, key := range cmd.Args {
@@ -457,7 +658,7 @@ func (h *Handler) handleDel(cmd *protocol.Command) *Response {
 		}
 	}
 	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 	}
 	return &Response{data: fmt.Appendf(nil, ":%d\r\n", count)}
 }
@@ -499,17 +700,17 @@ func (h *Handler) handleExpire(cmd *protocol.Command) *Response {
 	var seconds int
 	_, err := fmt.Sscanf(cmd.Args[1], "%d", &seconds)
 	if err != nil {
-		return &Response{err: fmt.Errorf("invalid expire value")}
+		return &Response{err: fmt.Errorf("ERR value is not an integer or out of range")}
 	}
 	// WAL first. Cache is untouched if WAL write fails.
 	if err := h.walAppend("EXPIRE", cmd.Args, cmd.Args[0], nil, int64(seconds)*int64(time.Second)); err != nil {
-		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+		return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 	}
 	if err := h.cache.Expire(cmd.Args[0], time.Duration(seconds)*time.Second); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
 	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 	}
 	return &Response{data: []byte(":1\r\n")}
 }
@@ -517,13 +718,13 @@ func (h *Handler) handleExpire(cmd *protocol.Command) *Response {
 func (h *Handler) handlePersist(cmd *protocol.Command) *Response {
 	// WAL first. Cache is untouched if WAL write fails.
 	if err := h.walAppend("PERSIST", cmd.Args, cmd.Args[0], nil, 0); err != nil {
-		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+		return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 	}
 	if err := h.cache.Persist(cmd.Args[0]); err != nil {
 		return &Response{data: []byte(":0\r\n")}
 	}
 	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 	}
 	return &Response{data: []byte(":1\r\n")}
 }
@@ -551,11 +752,11 @@ func (h *Handler) handleDBSize(cmd *protocol.Command) *Response {
 func (h *Handler) handleFlushAll(cmd *protocol.Command) *Response {
 	// WAL first. Cache is untouched if WAL write fails.
 	if err := h.walAppend("FLUSHALL", nil, "", nil, 0); err != nil {
-		return &Response{err: fmt.Errorf("WAL write failed: %w", err)}
+		return &Response{err: fmt.Errorf("ERR WAL write failed: %w", err)}
 	}
 	h.cache.Flush()
 	if err := h.replicateWrite(cmd.Name, cmd.Args); err != nil {
-		return &Response{err: fmt.Errorf("write applied locally but under-replicated: %w", err)}
+		return &Response{err: fmt.Errorf("ERR write applied locally but under-replicated: %w", err)}
 	}
 	return &Response{data: []byte("+OK\r\n")}
 }
@@ -567,6 +768,40 @@ func (h *Handler) handleInfo(cmd *protocol.Command) *Response {
 		stats.Keys, stats.Hits, stats.Misses, stats.HitRate,
 	)
 	return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(info), info)}
+}
+
+// handleCluster implements CLUSTER INFO and CLUSTER MYID only.
+// HydraCache shards via consistent hashing and routes every key
+// server-side; it does not speak the Redis Cluster wire protocol (no
+// CRC16 slot assignment, no MOVED/ASK redirects). Reporting
+// cluster_enabled:1 or implementing CLUSTER NODES/SLOTS in Redis
+// Cluster's own format would tell a cluster-aware client it can compute
+// slots and route directly to nodes itself — which would silently break,
+// since our routing algorithm isn't CRC16-mod-16384. Every other
+// subcommand is refused with an explicit explanation instead of a
+// fabricated reply.
+func (h *Handler) handleCluster(cmd *protocol.Command) *Response {
+	sub := strings.ToUpper(cmd.Args[0])
+	switch sub {
+	case "INFO":
+		sharded := 0
+		nodes := 1
+		if h.locator != nil {
+			nodes = h.locator.NodeCount()
+			if nodes > 1 {
+				sharded = 1
+			}
+		}
+		info := fmt.Sprintf(
+			"cluster_enabled:0\r\nhydracache_sharded:%d\r\nhydracache_node_id:%s\r\nhydracache_known_nodes:%d\r\n",
+			sharded, h.nodeID, nodes,
+		)
+		return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(info), info)}
+	case "MYID":
+		return &Response{data: fmt.Appendf(nil, "$%d\r\n%s\r\n", len(h.nodeID), h.nodeID)}
+	default:
+		return &Response{err: fmt.Errorf("ERR CLUSTER %s is not supported: HydraCache shards transparently server-side and does not speak the Redis Cluster protocol. Supported: CLUSTER INFO, CLUSTER MYID", cmd.Args[0])}
+	}
 }
 
 // walAppend writes a WAL entry if a WAL is configured. Returns an error
@@ -586,7 +821,7 @@ func (h *Handler) walAppend(cmd string, args []string, key string, value []byte,
 
 func (h *Handler) handleGossip(cmd *protocol.Command) *Response {
 	if h.gossip == nil {
-		return &Response{err: fmt.Errorf("gossip not configured")}
+		return &Response{err: fmt.Errorf("ERR gossip not configured")}
 	}
 	resp, err := h.gossip.HandleGossip(cmd.Args[0])
 	if err != nil {

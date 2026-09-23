@@ -27,7 +27,6 @@ import (
 	"github.com/hydracache/hydracache/internal/metrics"
 	"github.com/hydracache/hydracache/internal/network"
 	"github.com/hydracache/hydracache/internal/persistence"
-	"github.com/hydracache/hydracache/internal/pubsub"
 )
 
 func main() {
@@ -240,9 +239,6 @@ func main() {
 		})
 		log.Printf("[main] snapshot timer started (interval=%v)", cfg.WAL.SnapshotInterval)
 	}
-
-	broker := pubsub.NewBroker()
-	_ = broker
 
 	collector := metrics.NewCollector()
 

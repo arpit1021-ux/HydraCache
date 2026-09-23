@@ -137,7 +137,7 @@ func handleInfo(c *Client, args []string) {
 
 func handleCluster(c *Client, args []string) {
 	if len(args) < 1 {
-		fmt.Println("Cluster subcommands: info, nodes, slots")
+		fmt.Println("Cluster subcommands: info, myid")
 		return
 	}
 	cmdArgs := append([]string{"CLUSTER"}, args...)

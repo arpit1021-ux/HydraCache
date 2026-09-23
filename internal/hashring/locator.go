@@ -38,3 +38,9 @@ func (l *Locator) SetReplicationFactor(rf int) {
 func (l *Locator) ReplicationFactor() int {
 	return l.replicationFactor
 }
+
+// NodeCount returns how many nodes are currently on the ring this locator
+// routes against.
+func (l *Locator) NodeCount() int {
+	return l.ring.NodeCount()
+}

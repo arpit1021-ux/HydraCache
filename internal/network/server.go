@@ -211,7 +211,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	parser := protocol.NewParserWithLimits(reader, s.maxBulkBytes, protocol.DefaultMaxArrayLen)
 	encoder := protocol.NewEncoder(writer)
-	sess := &Session{}
+	sess := &Session{id: connID, addr: conn.RemoteAddr().String()}
 
 	for {
 		select {

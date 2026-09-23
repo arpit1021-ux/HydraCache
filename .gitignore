@@ -17,3 +17,12 @@ coverage.out
 node_modules/
 dist/
 INTERVIEW_QUESTIONS.md
+.mimocode/
+/hc
+/hydracache
+/coverage
+/chaos-output.txt
+/harness-out.txt
+/golangci-lint.zip
+/golangci-lint/
+*.tsbuildinfo
