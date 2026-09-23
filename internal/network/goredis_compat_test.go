@@ -123,7 +123,7 @@ func TestGoRedisCompat_SetXX(t *testing.T) {
 		t.Fatal("expected SETXX against a missing key to fail")
 	}
 
-	if err := client.Set(ctx, "present", "old", 0).Err(); err != nil {
+	if err = client.Set(ctx, "present", "old", 0).Err(); err != nil {
 		t.Fatalf("seed SET: %v", err)
 	}
 	onPresent, err := client.SetXX(ctx, "present", "new", 0).Result()
