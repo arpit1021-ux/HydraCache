@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HydraCache read-through demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
+  button { cursor: pointer; padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #ccc; background: #f5f5f5; }
+  button:hover { background: #eaeaea; }
+  input { padding: 0.3rem; }
+  .cache-hit { color: #0a7d33; font-weight: 600; }
+  .cache-miss { color: #b45309; font-weight: 600; }
+  #chaos-nodes { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .node-card { border: 1px solid #ddd; border-radius: 6px; padding: 0.5rem; min-width: 90px; text-align: center; }
+  .node-card.running { border-color: #0a7d33; }
+  .node-card.exited { border-color: #b91c1c; }
+  pre { background: #f7f7f7; padding: 0.6rem; border-radius: 6px; overflow-x: auto; }
+</style>
+</head>
+<body>
+  <h1>HydraCache read-through demo</h1>
+  <p>A small product catalog backed by Postgres, with HydraCache as a cache-aside layer in front of it. Fetch the same product twice — the second read should be faster and marked as a cache hit.</p>
+
+  <section>
+    <h2>Fetch a product</h2>
+    <input id="product-id" type="number" value="1" min="1">
+    <button onclick="fetchProduct()">GET /products/:id</button>
+    <pre id="product-result">(no request yet)</pre>
+  </section>
+
+  <section>
+    <h2>Live node control</h2>
+    <p>Requires the demo to be started with <code>-enable-chaos-controls</code>. Kills run <code>docker stop</code> on the named HydraCache container.</p>
+    <button onclick="refreshNodes()">Refresh status</button>
+    <div id="chaos-nodes"></div>
+  </section>
+
+  <script>
+    async function fetchProduct() {
+      const id = document.getElementById('product-id').value;
+      const out = document.getElementById('product-result');
+      out.textContent = 'loading...';
+      try {
+        const start = performance.now();
+        const res = await fetch(`/products/${id}`);
+        const body = await res.json();
+        const clientMS = (performance.now() - start).toFixed(1);
+        if (!res.ok) {
+          out.textContent = JSON.stringify(body, null, 2);
+          return;
+        }
+        const sourceClass = body.source === 'cache' ? 'cache-hit' : 'cache-miss';
+        out.innerHTML = `<span class="${sourceClass}">source: ${body.source}</span>\n` +
+          `server latency: ${body.latency_ms} ms | round-trip: ${clientMS} ms\n\n` +
+          JSON.stringify(body.product, null, 2);
+      } catch (e) {
+        out.textContent = 'request failed: ' + e;
+      }
+    }
+
+    async function refreshNodes() {
+      const container = document.getElementById('chaos-nodes');
+      container.textContent = 'loading...';
+      const res = await fetch('/admin/nodes');
+      const body = await res.json();
+      if (!body.enabled) {
+        container.textContent = 'Chaos controls are disabled on this server (start with -enable-chaos-controls).';
+        return;
+      }
+      container.innerHTML = '';
+      for (const n of body.nodes) {
+        const card = document.createElement('div');
+        card.className = 'node-card ' + n.state;
+        card.innerHTML = `<div>${n.node_id}</div><div>${n.state}</div>` +
+          `<button onclick="killNode('${n.node_id}')">kill</button>` +
+          `<button onclick="reviveNode('${n.node_id}')">revive</button>`;
+        container.appendChild(card);
+      }
+    }
+
+    async function killNode(id) {
+      await fetch(`/admin/nodes/${id}/kill`, { method: 'POST' });
+      refreshNodes();
+    }
+    async function reviveNode(id) {
+      await fetch(`/admin/nodes/${id}/revive`, { method: 'POST' });
+      refreshNodes();
+    }
+
+    refreshNodes();
+  </script>
+</body>
+</html>

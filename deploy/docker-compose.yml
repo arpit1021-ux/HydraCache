@@ -131,6 +131,32 @@ services:
     depends_on:
       - prometheus
 
+  # Backs the read-through reference app in examples/readthrough. Not
+  # used by HydraCache itself. Run the demo app on the host with
+  # `go run ./examples/readthrough` (see examples/readthrough/README.md)
+  # rather than containerizing it — its live "kill a node" control shells
+  # out to the docker CLI, which is simplest and safest to have available
+  # on the host rather than mounting the Docker socket into a container.
+  postgres:
+    image: postgres:16-alpine
+    container_name: hydracache-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=readthrough
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../examples/readthrough/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - hydracache
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   node1-data:
   node2-data:
@@ -138,6 +164,7 @@ volumes:
   node4-data:
   node5-data:
   grafana-data:
+  postgres-data:
 
 networks:
   hydracache:

@@ -34,7 +34,7 @@ Every component is built from first principles. No Redis source code copied. No 
 - **Self-Healing** — phi-accrual failure detection triggers automatic failover
 - **Leader Election** — simplified Raft with term numbers and quorum
 - **Persistence** — write-ahead log with CRC32 validation and periodic snapshots
-- **Redis Protocol** — full RESP compatibility, works with `redis-cli` and existing clients
+- **Redis Protocol** — RESP2 wire protocol; works with `redis-cli`, `go-redis`, and other RESP2 clients for the command set it implements (see [COMMANDS.md](COMMANDS.md) for exactly what that is and isn't)
 - **TTL & Eviction** — lazy + active expiration, LRU/LFU policies
 - **Monitoring** — Prometheus metrics endpoint, real-time React dashboard
 - **CLI** — production-quality command-line client over TCP
@@ -115,13 +115,15 @@ hc ttl session:abc                   # (integer) 3598
 $ redis-cli -p 7379
 127.0.0.1:7379> SET cache:hits 0
 OK
-127.0.0.1:7379> INCR cache:hits
-(integer) 1
 127.0.0.1:7379> GET cache:hits
-"1"
+"0"
 127.0.0.1:7379> TTL cache:hits
 (integer) -1
 ```
+
+A full read-through-cache reference application (Postgres-backed, with a
+live "kill a node" control) lives in
+[examples/readthrough](examples/readthrough/README.md).
 
 ---
 
@@ -152,6 +154,8 @@ hydracache/
 │   └── utils/           # Shared utilities
 ├── dashboard/           # React monitoring UI
 ├── deploy/              # Docker and Prometheus config
+├── examples/
+│   └── readthrough/     # Reference app: read-through cache over Postgres
 ├── scripts/             # Helper scripts
 └── docs/                # Architecture and design docs
 ```
@@ -170,6 +174,8 @@ hydracache/
 | [Self-Healing](docs/SELF_HEALING.md) | Failure detection and automatic recovery |
 | [Persistence](docs/PERSISTENCE.md) | WAL, snapshots, and crash recovery |
 | [API Reference](docs/API.md) | HTTP API endpoints and protocol details |
+| [Command Reference](COMMANDS.md) | Exactly what's implemented, partial, or unsupported over RESP |
+| [Reference Application](examples/readthrough/README.md) | Read-through cache over Postgres, with live node control |
 
 ---
 
@@ -186,10 +192,13 @@ hydracache/
 - [x] Prometheus metrics and Grafana dashboards
 - [x] React monitoring dashboard
 - [x] Docker Compose deployment
-- [ ] Synchronous replication mode
-- [ ] Redis Cluster protocol (MOVED/ASK)
-- [ ] TLS support
-- [ ] ACL and authentication
+- [x] Synchronous replication mode
+- [x] TLS and mutual TLS
+- [x] ACL and authentication
+- [x] Connection/request limits, bounded graceful shutdown, structured logging
+- [x] HELLO/CLIENT protocol negotiation, honest RESP2-only compatibility surface (see [COMMANDS.md](COMMANDS.md))
+- [x] Reference application: read-through cache over Postgres with live node control ([examples/readthrough](examples/readthrough))
+- [ ] Redis Cluster protocol (MOVED/ASK) — deliberately not planned; see COMMANDS.md's CLUSTER section for why
 - [ ] gRPC API layer
 
 ---

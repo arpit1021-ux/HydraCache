@@ -2,7 +2,12 @@
 
 ## TCP Protocol (RESP)
 
-HydraCache implements the Redis RESP protocol. Connect with any Redis client.
+HydraCache speaks RESP2 over TCP and works with `redis-cli` and RESP2
+clients like `go-redis`. It does not implement RESP3, the Redis Cluster
+protocol, pub/sub, or several other command families — see
+[COMMANDS.md](../COMMANDS.md) for the exact, generated list of what's
+implemented, partial, or unsupported before assuming a given client
+feature will work.
 
 ### Connection
 
