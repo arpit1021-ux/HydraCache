@@ -1,0 +1,114 @@
+name: Release
+
+# Triggered only by pushing a tag matching v*.*.* (e.g. v1.0.0). This repo
+# has no such tag yet as of writing this workflow — it was authored and
+# YAML/action-reference checked, but never actually exercised by pushing a
+# real tag, so "this workflow is correct" and "this workflow has produced a
+# real release" are different claims; only the first one is made here.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-binaries:
+    name: Build binaries (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          go build -o "dist/hydracache${ext}" ./cmd/server
+          go build -o "dist/hc${ext}" ./cmd/cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="hydracache-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "$name"
+          cp README.md LICENSE COMMANDS.md "$name"/
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp dist/hydracache.exe dist/hc.exe "$name"/
+            zip -r "${name}.zip" "$name"
+          else
+            cp dist/hydracache dist/hc "$name"/
+            tar -czf "${name}.tar.gz" "$name"
+          fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hydracache-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  docker-multiarch:
+    name: Multi-arch Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase image name
+        # GHCR requires a lowercase image path; github.repository preserves
+        # this repo's actual casing (arpit1021-ux/HydraCache), so it's
+        # normalized here rather than assumed.
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+
+  release:
+    name: Create GitHub Release
+    needs: [build-binaries, docker-multiarch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

@@ -34,6 +34,19 @@ jobs:
           go-version: '1.22'
       - name: Run tests with race detector
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Enforce coverage gate
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          # 55% is a regression floor set from the actual measured baseline
+          # (59.1% at the time this gate was added), with a few points of
+          # slack for normal fluctuation — not an aspirational target. It
+          # exists to catch a future change that quietly drops coverage a
+          # lot, not to imply every package individually clears 55%: cmd/cli
+          # sits at ~7% and several cmd/* packages have no tests at all
+          # (see the Test job's own per-package output above this step).
+          awk -v cov="$COVERAGE" 'BEGIN { exit (cov+0 < 55.0) ? 1 : 0 }' \
+            || { echo "Coverage ${COVERAGE}% is below the 55% regression floor"; exit 1; }
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
@@ -94,18 +107,3 @@ jobs:
           go build ./...
           go vet ./...
           go test -race ./...
-
-  coverage-badge:
-    name: Coverage Badge
-    runs-on: ubuntu-latest
-    needs: [test]
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: coverage
-      - name: Generate badge
-        run: |
-          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
-          echo "Coverage: ${COVERAGE}%"
