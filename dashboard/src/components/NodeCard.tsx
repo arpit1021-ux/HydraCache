@@ -1,5 +1,6 @@
-import { Server, Cpu, HardDrive, Crown } from 'lucide-react'
+import { Server, Clock, Crown } from 'lucide-react'
 import type { ClusterNode } from '../hooks/useClusterData'
+import { timeAgo } from '../lib/timeAgo'
 
 interface NodeCardProps {
   node: ClusterNode
@@ -73,37 +74,11 @@ export default function NodeCard({ node }: NodeCardProps) {
         </span>
       </div>
 
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Cpu size={12} className="text-gray-500" />
-          <div className="flex-1">
-            <div className="flex justify-between text-[11px] mb-0.5">
-              <span className="text-gray-400">CPU</span>
-              <span className="text-gray-300">{node.load}%</span>
-            </div>
-            <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  node.load > 80
-                    ? 'bg-red-500'
-                    : node.load > 60
-                    ? 'bg-amber-500'
-                    : 'bg-emerald-500'
-                }`}
-                style={{ width: `${Math.min(node.load, 100)}%` }}
-              />
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <HardDrive size={12} className="text-gray-500" />
-          <div className="flex-1">
-            <div className="flex justify-between text-[11px] mb-0.5">
-              <span className="text-gray-400">Memory</span>
-              <span className="text-gray-300">{node.memory_mb} MB</span>
-            </div>
-          </div>
-        </div>
+      <div className="flex items-center gap-2">
+        <Clock size={12} className="text-gray-500" />
+        <span className="text-[11px] text-gray-400">
+          Last seen <span className="text-gray-300">{timeAgo(node.last_seen)}</span>
+        </span>
       </div>
     </div>
   )

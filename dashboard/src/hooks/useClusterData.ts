@@ -5,14 +5,33 @@ export interface ClusterNode {
   address: string
   role: 'peer' | 'leader' | 'replica'
   health: 'alive' | 'suspect' | 'dead' | 'left'
-  load: number
-  memory_mb: number
   replication_lag: number
+  last_seen: string
+  joined_at: string
 }
 
 export interface ClusterData {
   nodes: ClusterNode[]
   epoch: number
+}
+
+// demoClusterData is shown only while disconnected from a real backend —
+// App.tsx renders a persistent "Demo Data — Disconnected" banner whenever
+// that's the case, so this is never presented as live telemetry.
+function demoClusterData(): ClusterData {
+  const now = Date.now()
+  const seenSecondsAgo = (s: number) => new Date(now - s * 1000).toISOString()
+  return {
+    nodes: [
+      { id: 'node-0', address: '127.0.0.1:8380', role: 'leader', health: 'alive', replication_lag: 0, last_seen: seenSecondsAgo(1), joined_at: seenSecondsAgo(86400) },
+      { id: 'node-1', address: '127.0.0.1:8381', role: 'replica', health: 'alive', replication_lag: 5, last_seen: seenSecondsAgo(1), joined_at: seenSecondsAgo(86400) },
+      { id: 'node-2', address: '127.0.0.1:8382', role: 'replica', health: 'alive', replication_lag: 8, last_seen: seenSecondsAgo(2), joined_at: seenSecondsAgo(86000) },
+      { id: 'node-3', address: '127.0.0.1:8383', role: 'replica', health: 'suspect', replication_lag: 45, last_seen: seenSecondsAgo(14), joined_at: seenSecondsAgo(85000) },
+      { id: 'node-4', address: '127.0.0.1:8384', role: 'replica', health: 'alive', replication_lag: 3, last_seen: seenSecondsAgo(1), joined_at: seenSecondsAgo(84000) },
+      { id: 'node-5', address: '127.0.0.1:8385', role: 'replica', health: 'alive', replication_lag: 7, last_seen: seenSecondsAgo(2), joined_at: seenSecondsAgo(83000) },
+    ],
+    epoch: Math.floor(now / 1000),
+  }
 }
 
 export function useClusterData(pollInterval = 3000) {
@@ -32,67 +51,7 @@ export function useClusterData(pollInterval = 3000) {
     } catch {
       if (mountedRef.current) {
         setConnected(false)
-        setClusterData((prev) =>
-          prev ?? {
-            nodes: [
-              {
-                id: 'node-0',
-                address: '127.0.0.1:8380',
-                role: 'leader',
-                health: 'alive',
-                load: 35,
-                memory_mb: 2048,
-                replication_lag: 0,
-              },
-              {
-                id: 'node-1',
-                address: '127.0.0.1:8381',
-                role: 'replica',
-                health: 'alive',
-                load: 42,
-                memory_mb: 1856,
-                replication_lag: 5,
-              },
-              {
-                id: 'node-2',
-                address: '127.0.0.1:8382',
-                role: 'replica',
-                health: 'alive',
-                load: 28,
-                memory_mb: 1536,
-                replication_lag: 8,
-              },
-              {
-                id: 'node-3',
-                address: '127.0.0.1:8383',
-                role: 'replica',
-                health: 'suspect',
-                load: 78,
-                memory_mb: 6144,
-                replication_lag: 45,
-              },
-              {
-                id: 'node-4',
-                address: '127.0.0.1:8384',
-                role: 'replica',
-                health: 'alive',
-                load: 22,
-                memory_mb: 1280,
-                replication_lag: 3,
-              },
-              {
-                id: 'node-5',
-                address: '127.0.0.1:8385',
-                role: 'replica',
-                health: 'alive',
-                load: 31,
-                memory_mb: 1600,
-                replication_lag: 7,
-              },
-            ],
-            epoch: Math.floor(Date.now() / 1000),
-          }
-        )
+        setClusterData((prev) => prev ?? demoClusterData())
       }
     }
   }, [])

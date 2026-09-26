@@ -103,7 +103,7 @@ export default function Dashboard({ clusterData, stats }: DashboardProps) {
           <h3 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">
             Latency Distribution
           </h3>
-          <LatencyHistogram />
+          <LatencyHistogram stats={stats} />
         </div>
         <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
           <h3 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">

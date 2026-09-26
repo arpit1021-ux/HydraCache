@@ -1,5 +1,6 @@
 import type { ClusterData } from '../hooks/useClusterData'
 import NodeGrid from '../components/NodeGrid'
+import { timeAgo } from '../lib/timeAgo'
 
 interface NodesProps {
   clusterData: ClusterData | null
@@ -39,8 +40,7 @@ export default function Nodes({ clusterData }: NodesProps) {
                 <th className="text-left px-5 py-3 font-medium">Address</th>
                 <th className="text-left px-5 py-3 font-medium">Role</th>
                 <th className="text-left px-5 py-3 font-medium">Status</th>
-                <th className="text-right px-5 py-3 font-medium">CPU</th>
-                <th className="text-right px-5 py-3 font-medium">Memory</th>
+                <th className="text-right px-5 py-3 font-medium">Last Seen</th>
                 <th className="text-right px-5 py-3 font-medium">Replication Lag</th>
               </tr>
             </thead>
@@ -77,9 +77,8 @@ export default function Nodes({ clusterData }: NodesProps) {
                       <span className="text-gray-400 capitalize">{node.health}</span>
                     </div>
                   </td>
-                  <td className="px-5 py-3 text-right font-mono text-gray-300">{node.load}%</td>
                   <td className="px-5 py-3 text-right font-mono text-gray-300">
-                    {node.memory_mb} MB
+                    {timeAgo(node.last_seen)}
                   </td>
                   <td className="px-5 py-3 text-right font-mono text-gray-300">
                     {node.replication_lag}

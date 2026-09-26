@@ -7,23 +7,43 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
+import type { Stats } from '../hooks/useStats'
 
-const latencyData = [
-  { range: '<1ms', count: 1240 },
-  { range: '1-5ms', count: 3580 },
-  { range: '5-10ms', count: 2890 },
-  { range: '10-25ms', count: 1420 },
-  { range: '25-50ms', count: 680 },
-  { range: '50-100ms', count: 320 },
-  { range: '100-250ms', count: 85 },
-  { range: '>250ms', count: 12 },
+interface LatencyHistogramProps {
+  stats: Stats | null
+}
+
+// Must match internal/metrics.LatencyHistogramBounds exactly — that's the
+// single source of truth for bucket boundaries; this is just the label
+// for each index the backend sends.
+const BUCKET_LABELS = [
+  '<1ms',
+  '1-5ms',
+  '5-10ms',
+  '10-25ms',
+  '25-50ms',
+  '50-100ms',
+  '100-250ms',
+  '>250ms',
 ]
 
-export default function LatencyHistogram() {
+export default function LatencyHistogram({ stats }: LatencyHistogramProps) {
+  const counts = stats?.latency_histogram
+
+  if (!counts) {
+    return (
+      <div className="h-64 flex items-center justify-center text-sm text-gray-600">
+        No latency data yet
+      </div>
+    )
+  }
+
+  const data = BUCKET_LABELS.map((range, i) => ({ range, count: counts[i] ?? 0 }))
+
   return (
     <div className="h-64">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={latencyData}>
+        <BarChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
           <XAxis
             dataKey="range"

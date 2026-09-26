@@ -50,52 +50,13 @@ export default function Metrics({ clusterData, stats }: MetricsProps) {
           <h3 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">
             Latency Distribution
           </h3>
-          <LatencyHistogram />
+          <LatencyHistogram stats={stats} />
         </div>
         <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
           <h3 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">
             Replication Lag Per Node
           </h3>
           <ReplicationStatus nodes={nodes} />
-        </div>
-      </div>
-
-      <div className="bg-gray-900/50 border border-gray-800 rounded-xl overflow-hidden">
-        <div className="px-5 py-3 border-b border-gray-800">
-          <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
-            Node Performance Summary
-          </h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
-                <th className="text-left px-5 py-3 font-medium">Node</th>
-                <th className="text-right px-5 py-3 font-medium">CPU Load</th>
-                <th className="text-right px-5 py-3 font-medium">Memory</th>
-                <th className="text-right px-5 py-3 font-medium">Replication Lag</th>
-              </tr>
-            </thead>
-            <tbody>
-              {nodes.map((node) => {
-                return (
-                  <tr
-                    key={node.id}
-                    className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
-                  >
-                    <td className="px-5 py-3 font-mono text-white">{node.id}</td>
-                    <td className="px-5 py-3 text-right font-mono text-gray-300">{node.load}%</td>
-                    <td className="px-5 py-3 text-right font-mono text-gray-300">
-                      {node.memory_mb} MB
-                    </td>
-                    <td className="px-5 py-3 text-right font-mono text-gray-300">
-                      {node.replication_lag}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
         </div>
       </div>
     </div>

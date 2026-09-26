@@ -72,6 +72,12 @@ export default function ClusterLogs() {
         <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
           Cluster Logs
         </span>
+        <span
+          className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider bg-amber-500/10 px-1.5 py-0.5 rounded"
+          title="HydraCache has no log-streaming API yet — these entries are generated client-side for illustration, not read from a real cluster."
+        >
+          Simulated
+        </span>
       </div>
       <div className="h-64 overflow-y-auto font-mono text-[11px] leading-relaxed p-3 space-y-0.5">
         {logs.map((log) => (
