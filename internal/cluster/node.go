@@ -101,8 +101,6 @@ type Node struct {
 	health      atomic.Int32
 	Region      string    `json:"region"`
 	Version     string    `json:"version"`
-	Load        float64   `json:"load"`
-	MemoryMB    int64     `json:"memory_mb"`
 	LastSeen    time.Time `json:"last_seen"`
 	JoinedAt    time.Time `json:"joined_at"`
 	Epoch       uint64    `json:"epoch"`
@@ -151,8 +149,6 @@ func (n *Node) MarshalJSON() ([]byte, error) {
 		Health      Health    `json:"health"`
 		Region      string    `json:"region"`
 		Version     string    `json:"version"`
-		Load        float64   `json:"load"`
-		MemoryMB    int64     `json:"memory_mb"`
 		LastSeen    time.Time `json:"last_seen"`
 		JoinedAt    time.Time `json:"joined_at"`
 		Epoch       uint64    `json:"epoch"`
@@ -165,8 +161,6 @@ func (n *Node) MarshalJSON() ([]byte, error) {
 		Health:      n.GetHealth(),
 		Region:      n.Region,
 		Version:     n.Version,
-		Load:        n.Load,
-		MemoryMB:    n.MemoryMB,
 		LastSeen:    n.LastSeen,
 		JoinedAt:    n.JoinedAt,
 		Epoch:       n.Epoch,
@@ -182,8 +176,6 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 		Health      Health    `json:"health"`
 		Region      string    `json:"region"`
 		Version     string    `json:"version"`
-		Load        float64   `json:"load"`
-		MemoryMB    int64     `json:"memory_mb"`
 		LastSeen    time.Time `json:"last_seen"`
 		JoinedAt    time.Time `json:"joined_at"`
 		Epoch       uint64    `json:"epoch"`
@@ -199,8 +191,6 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 	n.SetHealth(alias.Health)
 	n.Region = alias.Region
 	n.Version = alias.Version
-	n.Load = alias.Load
-	n.MemoryMB = alias.MemoryMB
 	n.LastSeen = alias.LastSeen
 	n.JoinedAt = alias.JoinedAt
 	n.Epoch = alias.Epoch

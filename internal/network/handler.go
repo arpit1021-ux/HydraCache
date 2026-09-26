@@ -434,6 +434,14 @@ func (h *Handler) Handle(cmd *protocol.Command) *Response {
 	}
 	if h.metricsCollector != nil {
 		h.metricsCollector.IncrRequests()
+		start := time.Now()
+		defer func() {
+			// defer runs after whichever case below returns, regardless of
+			// which one fired, so this measures the real end-to-end
+			// dispatch time for every command without threading timing
+			// through each individual handleX function.
+			h.metricsCollector.RecordLatency(cmd.Name, time.Since(start))
+		}()
 	}
 
 	switch cmd.Name {

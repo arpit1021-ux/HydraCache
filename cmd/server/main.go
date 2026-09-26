@@ -323,8 +323,6 @@ func main() {
 				Health         string    `json:"health"`
 				Region         string    `json:"region"`
 				Version        string    `json:"version"`
-				Load           float64   `json:"load"`
-				MemoryMB       int64     `json:"memory_mb"`
 				ReplicationLag int64     `json:"replication_lag"`
 				LastSeen       time.Time `json:"last_seen"`
 				JoinedAt       time.Time `json:"joined_at"`
@@ -364,8 +362,6 @@ func main() {
 					Health:         n.GetHealth().String(),
 					Region:         n.Region,
 					Version:        n.Version,
-					Load:           n.Load,
-					MemoryMB:       n.MemoryMB,
 					ReplicationLag: lag,
 					LastSeen:       n.LastSeen,
 					JoinedAt:       n.JoinedAt,
@@ -390,8 +386,9 @@ func main() {
 		mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			stats := localCache.Stats()
-			data := fmt.Sprintf(`{"keys":%d,"hits":%d,"misses":%d,"hit_rate":%.1f}`,
-				stats.Keys, stats.Hits, stats.Misses, stats.HitRate*100)
+			histogram, _ := json.Marshal(collector.LatencyHistogram())
+			data := fmt.Sprintf(`{"keys":%d,"hits":%d,"misses":%d,"hit_rate":%.1f,"latency_histogram":%s}`,
+				stats.Keys, stats.Hits, stats.Misses, stats.HitRate*100, histogram)
 			_, _ = w.Write([]byte(data))
 		})
 		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

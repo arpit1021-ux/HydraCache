@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func (c *Collector) PrometheusHandler() http.Handler {
@@ -55,6 +56,41 @@ func (c *Collector) PrometheusHandler() http.Handler {
 			return true
 		})
 
+		writeLatencyHistogram(&sb, c)
+
 		_, _ = w.Write([]byte(sb.String()))
+	})
+}
+
+// writeLatencyHistogram emits a real Prometheus histogram (cumulative
+// _bucket series with le labels, plus _sum and _count) per command, built
+// from the same per-method bucket counts RecordLatency populates — not a
+// separate, possibly-drifting set of numbers.
+func writeLatencyHistogram(sb *strings.Builder, c *Collector) {
+	sb.WriteString("# HELP hydracache_request_duration_seconds Command latency distribution\n")
+	sb.WriteString("# TYPE hydracache_request_duration_seconds histogram\n")
+
+	c.latencyBuckets.Range(func(key, value interface{}) bool {
+		method := key.(string)
+		bucket := value.(*latencyBucket)
+
+		var cumulative int64
+		for i, boundNs := range LatencyHistogramBounds {
+			cumulative += bucket.buckets[i].Load()
+			leSeconds := float64(boundNs) / float64(time.Second)
+			sb.WriteString(fmt.Sprintf(
+				"hydracache_request_duration_seconds_bucket{method=\"%s\",le=\"%g\"} %d\n",
+				method, leSeconds, cumulative,
+			))
+		}
+		total := bucket.count.Load()
+		sb.WriteString(fmt.Sprintf(
+			"hydracache_request_duration_seconds_bucket{method=\"%s\",le=\"+Inf\"} %d\n",
+			method, total,
+		))
+		sumSeconds := float64(bucket.total.Load()) / float64(time.Second)
+		sb.WriteString(fmt.Sprintf("hydracache_request_duration_seconds_sum{method=\"%s\"} %g\n", method, sumSeconds))
+		sb.WriteString(fmt.Sprintf("hydracache_request_duration_seconds_count{method=\"%s\"} %d\n", method, total))
+		return true
 	})
 }

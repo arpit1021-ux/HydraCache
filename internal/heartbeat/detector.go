@@ -12,8 +12,6 @@ type HeartbeatMessage struct {
 	Epoch     uint64
 	Seq       int64
 	Timestamp time.Time
-	Load      float64
-	MemoryMB  int64
 }
 
 func shortID(id string) string {

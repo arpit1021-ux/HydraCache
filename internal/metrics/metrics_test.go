@@ -202,6 +202,67 @@ func TestRecordLatency_MaxTracking(t *testing.T) {
 	}
 }
 
+func TestLatencyHistogram_BucketsByBoundary(t *testing.T) {
+	c := NewCollector()
+	// One sample in each bucket, in order, plus one that must land in the
+	// overflow bucket (>= the last bound).
+	samples := []time.Duration{
+		500 * time.Microsecond, // < 1ms   -> bucket 0
+		2 * time.Millisecond,   // 1-5ms   -> bucket 1
+		7 * time.Millisecond,   // 5-10ms  -> bucket 2
+		15 * time.Millisecond,  // 10-25ms -> bucket 3
+		30 * time.Millisecond,  // 25-50ms -> bucket 4
+		75 * time.Millisecond,  // 50-100ms -> bucket 5
+		150 * time.Millisecond, // 100-250ms -> bucket 6
+		999 * time.Millisecond, // >= 250ms -> overflow bucket 7
+	}
+	for _, d := range samples {
+		c.RecordLatency("OP", d)
+	}
+
+	hist := c.LatencyHistogram()
+	if len(hist) != numLatencyBuckets {
+		t.Fatalf("len(hist) = %d, want %d", len(hist), numLatencyBuckets)
+	}
+	for i, count := range hist {
+		if count != 1 {
+			t.Errorf("bucket %d = %d, want exactly 1 sample", i, count)
+		}
+	}
+}
+
+// TestLatencyHistogram_AggregatesAcrossMethods proves the dashboard's
+// single global chart reflects every command, not just whichever one
+// happened to be recorded most recently — RecordLatency tracks per
+// method, but the dashboard wants one histogram.
+func TestLatencyHistogram_AggregatesAcrossMethods(t *testing.T) {
+	c := NewCollector()
+	c.RecordLatency("GET", 2*time.Millisecond)  // bucket 1
+	c.RecordLatency("SET", 2*time.Millisecond)  // bucket 1
+	c.RecordLatency("DEL", 30*time.Millisecond) // bucket 4
+
+	hist := c.LatencyHistogram()
+	if hist[1] != 2 {
+		t.Errorf("bucket 1 = %d, want 2 (one GET + one SET)", hist[1])
+	}
+	if hist[4] != 1 {
+		t.Errorf("bucket 4 = %d, want 1 (one DEL)", hist[4])
+	}
+}
+
+func TestLatencyHistogram_EmptyCollectorReturnsAllZeros(t *testing.T) {
+	c := NewCollector()
+	hist := c.LatencyHistogram()
+	if len(hist) != numLatencyBuckets {
+		t.Fatalf("len(hist) = %d, want %d", len(hist), numLatencyBuckets)
+	}
+	for i, count := range hist {
+		if count != 0 {
+			t.Errorf("bucket %d = %d, want 0 on a fresh collector", i, count)
+		}
+	}
+}
+
 func TestSetReplicationLag(t *testing.T) {
 	c := NewCollector()
 	c.SetReplicationLag("node-1", 100)
@@ -493,6 +554,47 @@ func TestPrometheusHandler_ReplicationLags(t *testing.T) {
 	}
 }
 
+// TestPrometheusHandler_LatencyHistogram proves the exporter emits a real
+// cumulative Prometheus histogram (bucket counts that only grow as le
+// increases, a +Inf bucket equal to the total count, and _sum/_count) —
+// not just a HELP/TYPE header with no actual series behind it.
+func TestPrometheusHandler_LatencyHistogram(t *testing.T) {
+	c := NewCollector()
+	c.RecordLatency("GET", 2*time.Millisecond)  // bucket 1 (1-5ms)
+	c.RecordLatency("GET", 30*time.Millisecond) // bucket 4 (25-50ms)
+
+	handler := c.PrometheusHandler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	for _, expected := range []string{
+		"# TYPE hydracache_request_duration_seconds histogram",
+		`hydracache_request_duration_seconds_bucket{method="GET",le="0.001"} 0`,
+		`hydracache_request_duration_seconds_bucket{method="GET",le="0.005"} 1`,
+		`hydracache_request_duration_seconds_bucket{method="GET",le="0.05"} 2`,
+		`hydracache_request_duration_seconds_bucket{method="GET",le="+Inf"} 2`,
+		`hydracache_request_duration_seconds_count{method="GET"} 2`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("prometheus output missing %q\nfull output:\n%s", expected, body)
+		}
+	}
+}
+
+func TestPrometheusHandler_LatencyHistogram_NoMethodsRecordedYet(t *testing.T) {
+	c := NewCollector()
+	handler := c.PrometheusHandler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req) // must not panic with an empty latencyBuckets map
+
+	if !strings.Contains(rec.Body.String(), "# TYPE hydracache_request_duration_seconds histogram") {
+		t.Error("expected the histogram HELP/TYPE header even with no recorded methods")
+	}
+}
+
 func TestPrometheusHandler_EmptyMetrics(t *testing.T) {
 	c := NewCollector()
 	handler := c.PrometheusHandler()
@@ -647,17 +749,34 @@ func TestSetToZero(t *testing.T) {
 	}
 }
 
-func TestSnapshot_LatencyNotInSnapshot(t *testing.T) {
+// TestSnapshot_IncludesLatencyHistogram is the regression test for a real
+// gap this session found: RecordLatency was called by nothing in
+// production, and even if it had been, Snapshot() didn't expose what it
+// tracked — the dashboard's latency chart had no real data to show
+// regardless. Snapshot now includes the aggregated histogram alongside
+// the existing atomic counters.
+func TestSnapshot_IncludesLatencyHistogram(t *testing.T) {
 	c := NewCollector()
 	c.RecordLatency("GET", 5*time.Millisecond)
 	c.RecordLatency("SET", 10*time.Millisecond)
 
 	snap := c.Snapshot()
-	// latency buckets are stored separately, Snapshot doesn't include them
-	// this test verifies Snapshot only returns the atomic counter fields
-	if len(snap) != 10 {
-		t.Errorf("Snapshot has %d keys, expected 10", len(snap))
+	if len(snap) != 11 {
+		t.Errorf("Snapshot has %d keys, expected 11 (10 counters + latency_histogram)", len(snap))
 	}
 
-	_ = snap
+	hist, ok := snap["latency_histogram"].([]int64)
+	if !ok {
+		t.Fatalf("latency_histogram = %v (%T), want []int64", snap["latency_histogram"], snap["latency_histogram"])
+	}
+	if len(hist) != numLatencyBuckets {
+		t.Errorf("len(latency_histogram) = %d, want %d", len(hist), numLatencyBuckets)
+	}
+	var total int64
+	for _, count := range hist {
+		total += count
+	}
+	if total != 2 {
+		t.Errorf("total histogram count = %d, want 2 (one GET + one SET)", total)
+	}
 }

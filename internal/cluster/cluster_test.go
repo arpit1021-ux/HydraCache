@@ -726,8 +726,6 @@ func TestNode_JSONSerialization(t *testing.T) {
 	n := NewNode("n1", "127.0.0.1:7000")
 	n.SetRole(RoleLeader)
 	n.Region = "us-east-1"
-	n.Load = 0.75
-	n.MemoryMB = 4096
 
 	data, err := json.Marshal(n)
 	if err != nil {
