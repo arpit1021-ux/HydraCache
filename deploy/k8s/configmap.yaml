@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hydracache-config
+  namespace: hydracache
+  labels:
+    app.kubernetes.io/name: hydracache
+data:
+  # Loaded via -config; internal/config.LoadConfig starts from
+  # config.DefaultConfig() and overlays only what's set here, so this file
+  # deliberately doesn't restate every default (see internal/config/config.go
+  # for the full set) — only the values a real cluster deployment actually
+  # wants different from a single-node default.
+  #
+  # node_id, advertise_addr, and seed_nodes are NOT set here — they're
+  # per-pod identity, computed in statefulset.yaml's container command from
+  # the pod's own stable DNS name via the Kubernetes Downward API, not
+  # something a cluster-wide ConfigMap could express correctly.
+  config.yaml: |
+    log:
+      level: info
+      format: json
+      output: stdout
+    cache:
+      eviction_policy: lru
+      replication_factor: 2
+      replication_mode: async
+    wal:
+      enabled: true
+      dir: /data/wal
+      sync_mode: everysec

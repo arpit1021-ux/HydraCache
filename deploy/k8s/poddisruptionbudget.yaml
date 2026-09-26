@@ -1,0 +1,19 @@
+# Bounds voluntary disruption (node drains, cluster upgrades) so Kubernetes
+# never evicts enough HydraCache pods at once to break election quorum.
+# minAvailable: 3 out of 5 replicas is a quorum-of-5 majority (see
+# internal/election's quorum requirement in INTERVIEW_PREP.md Part 4.7) —
+# this does not by itself protect against involuntary disruption (a node
+# crashing outright), only against Kubernetes voluntarily evicting pods for
+# maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hydracache-pdb
+  namespace: hydracache
+  labels:
+    app.kubernetes.io/name: hydracache
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hydracache

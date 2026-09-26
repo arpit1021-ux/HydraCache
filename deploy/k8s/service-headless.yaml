@@ -1,0 +1,24 @@
+# Headless service (clusterIP: None): gives each pod a stable DNS name of
+# the form <pod-name>.hydracache-headless.hydracache.svc.cluster.local,
+# which is what statefulset.yaml uses to build each node's -advertise
+# address and to compute the seed address for -join. This is not for
+# client traffic — see service-client.yaml for that.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hydracache-headless
+  namespace: hydracache
+  labels:
+    app.kubernetes.io/name: hydracache
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: hydracache
+  ports:
+    - name: resp
+      port: 7379
+      targetPort: 7379
+    - name: http
+      port: 8379
+      targetPort: 8379
+  publishNotReadyAddresses: true

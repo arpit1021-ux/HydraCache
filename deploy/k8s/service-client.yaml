@@ -1,0 +1,26 @@
+# Client-facing service: a normal ClusterIP load-balancing across whichever
+# pods are Ready. Note the same honest limitation documented in
+# examples/readthrough/README.md and COMMANDS.md applies here — HydraCache
+# does not speak the Redis Cluster protocol, so a client connecting through
+# this Service gets routed to an arbitrary healthy node, not necessarily the
+# primary for the key it's about to use. Within a single Service this is no
+# different from cmd/cli's own single-fixed-address model; it does not add
+# sharding-aware routing that doesn't exist in the server itself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hydracache-client
+  namespace: hydracache
+  labels:
+    app.kubernetes.io/name: hydracache
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: hydracache
+  ports:
+    - name: resp
+      port: 7379
+      targetPort: 7379
+    - name: http
+      port: 8379
+      targetPort: 8379
