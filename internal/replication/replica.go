@@ -46,7 +46,11 @@ func (r *ReplicaInfo) SetLagSeq(v int64)         { r.lagSeq.Store(v) }
 func (r *ReplicaInfo) GetLastSync() time.Time    { return time.Unix(0, r.lastSync.Load()) }
 func (r *ReplicaInfo) SetLastSync(t time.Time)   { r.lastSync.Store(t.UnixNano()) }
 
-type ReplicaStatus int
+// ReplicaStatus is int32, not int, specifically so storing it in the
+// atomic.Int32 above (status) is a same-width conversion, not a
+// narrowing one — matching the same pattern internal/cluster/node.go's
+// Role and Health types already use for their own atomic-backed enums.
+type ReplicaStatus int32
 
 const (
 	ReplicaSyncing ReplicaStatus = iota

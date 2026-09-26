@@ -7,6 +7,7 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    - gosec
 
 linters-settings:
   errcheck:
@@ -29,8 +30,31 @@ issues:
     - path: _test\.go
       linters:
         - errcheck
-    # Unused methods may be needed for future features
-    - path: internal/cluster/manager\.go
-      text: "is unused"
+    # Test files: file-write permissions and int-width conversions in test
+    # fixtures/loop counters carry none of the data-at-rest or untrusted-
+    # input risk gosec's G306/G115 exist to catch in production code.
+    - path: _test\.go
       linters:
-        - unused
+        - gosec
+      text: "G306|G115"
+    # internal/chaostest/harness.go shells out to docker with node/container
+    # names drawn from a fixed, compiled-in registry (nodeRegistry) — not
+    # network- or user-controlled input. It's a local dev/CI tool a
+    # developer runs themselves, not a network-facing service; the
+    # "tainted input" premise behind G204 doesn't apply to its threat model.
+    - path: internal/chaostest/harness\.go
+      linters:
+        - gosec
+      text: "G204"
+    # math/rand, not crypto/rand, is the correct choice at each of these
+    # three sites: internal/utils/id.go generates a non-secret node ID,
+    # internal/simulator deliberately injects randomized failures for
+    # testing (the whole point is unpredictability for test coverage, not
+    # unguessability against an adversary), and internal/election's
+    # randomTimeout jitters an election timeout to avoid split votes — none
+    # of these are security tokens, keys, or anything an attacker gains by
+    # predicting.
+    - path: internal/(utils/id|simulator/simulator|election/election)\.go
+      linters:
+        - gosec
+      text: "G404"

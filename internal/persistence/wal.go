@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -85,7 +86,7 @@ func NewWAL(dir string, maxSize int64, syncMode SyncMode) (*WAL, error) {
 	}
 
 	walPath := filepath.Join(dir, "wal.log")
-	f, err := os.OpenFile(walPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	f, err := os.OpenFile(walPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL file: %w", err)
 	}
@@ -167,7 +168,7 @@ func (w *WAL) recover() error {
 		if err := os.Truncate(name, validEnd); err != nil {
 			return fmt.Errorf("truncate torn WAL tail at offset %d: %w", validEnd, err)
 		}
-		f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 		if err != nil {
 			return fmt.Errorf("reopen WAL file after truncating torn tail: %w", err)
 		}
@@ -189,11 +190,17 @@ func (w *WAL) Append(entry WALEntry) error {
 	entry.Seq = atomic.AddInt64(&w.seq, 1)
 	entry.Timestamp = time.Now().UnixNano()
 
-	data := encodeWALEntry(entry)
+	data, err := encodeWALEntry(entry)
+	if err != nil {
+		return fmt.Errorf("encode WAL entry: %w", err)
+	}
 	crc := crc32.ChecksumIEEE(data)
 
-	_, err := w.file.Write(encodeRecord(crc, data))
+	record, err := encodeRecord(crc, data)
 	if err != nil {
+		return fmt.Errorf("encode WAL record: %w", err)
+	}
+	if _, err := w.file.Write(record); err != nil {
 		return fmt.Errorf("failed to write WAL entry: %w", err)
 	}
 
@@ -291,7 +298,7 @@ func (w *WAL) Truncate() error {
 		return err
 	}
 
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
@@ -346,37 +353,61 @@ func (w *WAL) Close() error {
 	return w.file.Close()
 }
 
-func encodeRecord(crc uint32, data []byte) []byte {
+// maxWALFieldLen bounds any single length-prefixed field this encoding
+// writes as a uint32 length. Converting an int (or int64) length that
+// exceeds this to uint32 would silently truncate instead of erroring —
+// exactly the class of bug internal/protocol's parser was hardened against
+// earlier (a length that doesn't fit its wire encoding must be rejected
+// before it's written, not truncated and misread later). In practice
+// internal/protocol's own MaxBulkBytes limit keeps any single client value
+// far below this, but the WAL's own encoding shouldn't depend on that
+// upstream limit being the only thing preventing corruption.
+const maxWALFieldLen = math.MaxUint32
+
+func encodeRecord(crc uint32, data []byte) ([]byte, error) {
+	if len(data) > maxWALFieldLen {
+		return nil, fmt.Errorf("WAL record of %d bytes exceeds the maximum encodable length (%d)", len(data), maxWALFieldLen)
+	}
 	buf := make([]byte, 4+4+len(data))
 	binary.BigEndian.PutUint32(buf[0:4], crc)
-	binary.BigEndian.PutUint32(buf[4:8], uint32(len(data)))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(len(data))) //nolint:gosec // bounds-checked against maxWALFieldLen above
 	copy(buf[8:], data)
-	return buf
+	return buf, nil
 }
 
-func encodeWALEntry(entry WALEntry) []byte {
+func encodeWALEntry(entry WALEntry) ([]byte, error) {
 	keyBytes := []byte(entry.Key)
 	valueBytes := entry.Value
+	if len(keyBytes) > maxWALFieldLen {
+		return nil, fmt.Errorf("WAL entry key of %d bytes exceeds the maximum encodable length (%d)", len(keyBytes), maxWALFieldLen)
+	}
+	if len(valueBytes) > maxWALFieldLen {
+		return nil, fmt.Errorf("WAL entry value of %d bytes exceeds the maximum encodable length (%d)", len(valueBytes), maxWALFieldLen)
+	}
 
 	buf := make([]byte, 0, 8+8+len(keyBytes)+4+len(valueBytes)+8+8)
-	buf = binary.BigEndian.AppendUint64(buf, uint64(entry.Seq))
+	// entry.Seq, entry.TTL, and entry.Timestamp are int64 reinterpreted as
+	// uint64 (and reversed symmetrically in decodeWALEntry) — a same-width
+	// bit-pattern round trip, not a narrowing conversion, so it's lossless
+	// regardless of sign.
+	buf = binary.BigEndian.AppendUint64(buf, uint64(entry.Seq)) //nolint:gosec // same-width int64<->uint64 round trip, see decodeWALEntry
 	buf = append(buf, byte(len(entry.Cmd)))
 	buf = append(buf, entry.Cmd...)
-	buf = binary.BigEndian.AppendUint32(buf, uint32(len(keyBytes)))
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(keyBytes))) //nolint:gosec // bounds-checked against maxWALFieldLen above
 	buf = append(buf, keyBytes...)
-	buf = binary.BigEndian.AppendUint32(buf, uint32(len(valueBytes)))
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(valueBytes))) //nolint:gosec // bounds-checked against maxWALFieldLen above
 	buf = append(buf, valueBytes...)
-	buf = binary.BigEndian.AppendUint64(buf, uint64(entry.TTL))
-	buf = binary.BigEndian.AppendUint64(buf, uint64(entry.Timestamp))
+	buf = binary.BigEndian.AppendUint64(buf, uint64(entry.TTL))       //nolint:gosec // same-width int64<->uint64 round trip, see decodeWALEntry
+	buf = binary.BigEndian.AppendUint64(buf, uint64(entry.Timestamp)) //nolint:gosec // same-width int64<->uint64 round trip, see decodeWALEntry
 
-	return buf
+	return buf, nil
 }
 
 func decodeWALEntry(data []byte) *WALEntry {
 	entry := &WALEntry{}
 	offset := 0
 
-	entry.Seq = int64(binary.BigEndian.Uint64(data[offset:]))
+	entry.Seq = int64(binary.BigEndian.Uint64(data[offset:])) //nolint:gosec // same-width uint64<->int64 round trip, see encodeWALEntry
 	offset += 8
 
 	cmdLen := int(data[offset])
@@ -395,10 +426,10 @@ func decodeWALEntry(data []byte) *WALEntry {
 	copy(entry.Value, data[offset:offset+valLen])
 	offset += valLen
 
-	entry.TTL = int64(binary.BigEndian.Uint64(data[offset:]))
+	entry.TTL = int64(binary.BigEndian.Uint64(data[offset:])) //nolint:gosec // same-width uint64<->int64 round trip, see encodeWALEntry
 	offset += 8
 
-	entry.Timestamp = int64(binary.BigEndian.Uint64(data[offset:]))
+	entry.Timestamp = int64(binary.BigEndian.Uint64(data[offset:])) //nolint:gosec // same-width uint64<->int64 round trip, see encodeWALEntry
 
 	return entry
 }

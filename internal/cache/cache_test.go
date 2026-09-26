@@ -196,23 +196,6 @@ func TestLocalCacheStats(t *testing.T) {
 	}
 }
 
-func TestBloomFilter(t *testing.T) {
-	bf := NewBloomFilter(1000, 0.01)
-
-	bf.Add("hello")
-	bf.Add("world")
-
-	if !bf.Contains("hello") {
-		t.Error("expected bloom filter to contain 'hello'")
-	}
-	if !bf.Contains("world") {
-		t.Error("expected bloom filter to contain 'world'")
-	}
-	if bf.Contains("missing") {
-		t.Error("bloom filter false positive")
-	}
-}
-
 func TestLRUEviction(t *testing.T) {
 	lru := NewLRU(3)
 

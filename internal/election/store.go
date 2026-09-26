@@ -67,7 +67,7 @@ func (s *FileTermStore) Save(st PersistedState) error {
 	}
 
 	tmp := s.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("election: open temp state file %s: %w", tmp, err)
 	}

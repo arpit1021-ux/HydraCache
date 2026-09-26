@@ -24,7 +24,12 @@ FROM alpine:3.19
 
 RUN apk --no-cache add ca-certificates tzdata
 
-RUN adduser -D -g '' hydracache
+# Pinned UID/GID (not left to adduser's next-available default): a
+# Kubernetes PersistentVolume mount at /data overlays whatever this layer's
+# chown set, so anything orchestrating this image (see deploy/k8s) needs to
+# know the exact numeric UID/GID to set as fsGroup/runAsUser — an
+# unpinned ID would make that a guess instead of a fact.
+RUN addgroup -g 1000 hydracache && adduser -D -u 1000 -G hydracache -g '' hydracache
 
 WORKDIR /app
 

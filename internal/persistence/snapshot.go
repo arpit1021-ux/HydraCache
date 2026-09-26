@@ -60,7 +60,7 @@ func (s *Snapshotter) Save(data SnapshotData) error {
 	tmpPath := filepath.Join(s.dir, "snapshot.tmp")
 	finalPath := filepath.Join(s.dir, "snapshot.json")
 
-	if err := os.WriteFile(tmpPath, jsonData, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, jsonData, 0600); err != nil {
 		return fmt.Errorf("failed to write snapshot: %w", err)
 	}
 

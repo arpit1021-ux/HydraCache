@@ -310,6 +310,7 @@ func main() {
 	}
 
 	// --- HTTP API ---
+	var httpServer *http.Server
 	if cfg.HTTP.Enabled {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", collector.PrometheusHandler())
@@ -409,9 +410,27 @@ func main() {
 			log.Printf("[main] dashboard not found at %s, skipping UI", dashboardDir)
 		}
 
+		// A bare http.ListenAndServe has no read/write/idle timeouts at
+		// all — a slow or hung client (deliberate Slowloris-style abuse,
+		// or just a bad network path) can hold a connection and its
+		// goroutine open indefinitely, the exact same resource-exhaustion
+		// shape the RESP listener's own ReadTimeout/WriteTimeout already
+		// guard against (internal/network/server.go). This endpoint is
+		// metrics/admin/dashboard traffic, not the hot path, so these
+		// timeouts are generous fixed defaults rather than new config
+		// surface — nothing here is latency-sensitive enough to need
+		// per-deployment tuning.
+		httpServer = &http.Server{
+			Addr:              cfg.HTTP.Addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		go func() {
 			log.Printf("[main] HTTP server listening on %s", cfg.HTTP.Addr)
-			if err := http.ListenAndServe(cfg.HTTP.Addr, mux); err != nil {
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("[main] HTTP server error: %v", err)
 			}
 		}()
@@ -468,6 +487,13 @@ func main() {
 	cancel()
 	elect.Stop()
 	tcpServer.Shutdown()
+	if httpServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[main] HTTP server shutdown error: %v", err)
+		}
+		shutdownCancel()
+	}
 
 	if snapshotter != nil {
 		snapshotter.Stop()
