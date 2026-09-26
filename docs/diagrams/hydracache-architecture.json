@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "HydraCache Runtime Architecture",
+    "subtitle": "One node's request path, cluster coordination, and external consumers",
+    "output": "hydracache-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/arpit1021-ux/HydraCache",
+      "provider": "github",
+      "revision": "9a97d2f00909fc6d03fdb74991d1cea621902612"
+    },
+    "views": [
+      { "id": "request-path", "label": "A client request", "focus": ["client", "tcp_listener", "command_handler", "cache_engine"], "note": "Follow one SET/GET from the wire into the in-memory store." },
+      { "id": "durability-and-routing", "label": "Durability and routing", "focus": ["command_handler", "wal", "hash_ring", "replication", "peer_nodes"], "note": "See how a write survives a crash and reaches the right shard's replicas." },
+      { "id": "self-healing", "label": "Cluster self-healing", "focus": ["cluster_coord", "peer_nodes", "command_handler"], "note": "Gossip, failure detection, and leader election run independently of client traffic." },
+      { "id": "observability", "label": "Observability consumers", "focus": ["cache_engine", "metrics_http", "dashboard", "prometheus"], "note": "Nothing here is on the hot path — dashboards and Prometheus pull, they never push." }
+    ]
+  },
+  "components": [
+    { "id": "client", "type": "external", "label": "RESP Clients", "sublabel": "CLI + app clients", "pos": [40, 180], "size": [140, 64] },
+    { "id": "tcp_listener", "type": "security", "label": "TCP / RESP Listener", "sublabel": "AUTH + TLS gate", "pos": [210, 180], "size": [140, 64], "tag": "internal/network.Server", "sources": [{ "path": "internal/network/server.go", "line": 177, "label": "handleConnection" }, { "path": "internal/network/server.go", "line": 153, "label": "acceptLoop" }] },
+    { "id": "command_handler", "type": "backend", "label": "Command Handler", "sublabel": "RESP command dispatch", "pos": [380, 180], "size": [140, 64], "tag": "internal/network.Handler", "sources": [{ "path": "internal/network/handler.go", "line": 187, "label": "HandleAuthenticated" }, { "path": "internal/network/handler.go", "line": 431, "label": "Handle" }] },
+    { "id": "cache_engine", "type": "database", "label": "In-Memory Cache", "sublabel": "LRU/LFU + TTL", "pos": [550, 180], "size": [140, 64], "tag": "internal/cache", "sources": [{ "path": "internal/cache/cache.go", "line": 163, "label": "Set" }, { "path": "internal/cache/cache.go", "line": 188, "label": "Get" }] },
+    { "id": "hash_ring", "type": "backend", "label": "Consistent Hash Ring", "sublabel": "150 vnodes/node", "pos": [720, 180], "size": [140, 64], "tag": "internal/hashring", "sources": [{ "path": "internal/hashring/ring.go", "line": 69, "label": "GetNode" }] },
+    { "id": "replication", "type": "backend", "label": "Replication Stream", "sublabel": "async / sync fan-out", "pos": [890, 180], "size": [140, 64], "tag": "internal/replication", "sources": [{ "path": "internal/network/handler.go", "line": 855, "label": "replicateWrite" }, { "path": "internal/network/handler.go", "line": 1040, "label": "handleReplicate" }] },
+    { "id": "peer_nodes", "type": "external", "label": "Peer HydraCache Nodes", "sublabel": "separate OS processes", "pos": [1060, 180], "size": [150, 64] },
+    { "id": "wal", "type": "database", "label": "WAL + Snapshots", "sublabel": "crash recovery", "pos": [380, 340], "size": [140, 62], "tag": "internal/persistence", "sources": [{ "path": "internal/persistence/wal.go", "line": 82, "label": "NewWAL" }, { "path": "internal/persistence/wal.go", "line": 185, "label": "Append" }] },
+    { "id": "cluster_coord", "type": "backend", "label": "Cluster Coordination", "sublabel": "gossip, heartbeat, election", "pos": [700, 30], "size": [190, 66], "tag": "internal/cluster, election, heartbeat", "sources": [{ "path": "internal/cluster/gossip.go", "line": 97, "label": "NewGossip" }, { "path": "internal/election/election.go", "line": 130, "label": "election.New" }, { "path": "internal/heartbeat/detector.go", "line": 219, "label": "NewDetector" }] },
+    { "id": "metrics_http", "type": "backend", "label": "Metrics / Admin HTTP", "sublabel": ":8379, JSON + Prometheus", "pos": [550, 340], "size": [150, 62], "tag": "internal/metrics + cmd/server", "sources": [{ "path": "internal/metrics/collector.go", "line": 135, "label": "Snapshot" }, { "path": "cmd/server/main.go", "line": 316, "label": "/api/cluster" }] },
+    { "id": "dashboard", "type": "frontend", "label": "React Dashboard", "sublabel": "polls every 2-3s", "pos": [440, 460], "size": [140, 62], "tag": "dashboard/", "sources": [{ "path": "dashboard/src/App.tsx", "line": 13, "label": "App" }] },
+    { "id": "prometheus", "type": "external", "label": "Prometheus / Grafana", "sublabel": "scrapes /metrics", "pos": [680, 460], "size": [150, 62] }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "one HydraCache node process — shared memory inside, network only outside", "wraps": ["tcp_listener", "command_handler", "cache_engine", "hash_ring", "replication", "wal", "cluster_coord", "metrics_http"], "pad": 20 }
+  ],
+  "connections": [
+    { "from": "client", "to": "tcp_listener", "label": "RESP over TLS, AUTH", "variant": "security", "labelDy": -26 },
+    { "from": "tcp_listener", "to": "command_handler", "label": "parsed Command", "variant": "emphasis", "labelDy": -26 },
+    { "from": "command_handler", "to": "cache_engine", "label": "GET / SET / DEL", "variant": "emphasis", "labelDy": -26 },
+    { "from": "command_handler", "to": "wal", "label": "append before mutate", "variant": "dashed", "labelDy": 24 },
+    { "from": "command_handler", "to": "hash_ring", "label": "who owns this key?", "fromSide": "top", "toSide": "top", "via": [[450, 120], [790, 120]], "labelAt": [620, 102] },
+    { "from": "command_handler", "to": "cluster_coord", "label": "leader + epoch check", "variant": "dashed", "fromSide": "top", "toSide": "left", "via": [[450, 63]] },
+    { "from": "hash_ring", "to": "replication", "label": "primary decision", "labelDy": -26 },
+    { "from": "replication", "to": "peer_nodes", "label": "REPLICATE op", "variant": "security", "labelDy": -26 },
+    { "from": "cluster_coord", "to": "peer_nodes", "label": "gossip, heartbeat, vote (bidirectional)", "variant": "dashed", "fromSide": "right", "toSide": "top" },
+    { "from": "cache_engine", "to": "metrics_http", "label": "stats snapshot", "fromSide": "bottom", "toSide": "top" },
+    { "from": "dashboard", "to": "metrics_http", "label": "poll /api/*", "fromSide": "top", "toSide": "bottom" },
+    { "from": "prometheus", "to": "metrics_http", "label": "scrape /metrics", "fromSide": "top", "toSide": "bottom" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Trust boundaries", "items": ["Dashed box = one OS process; only way in is the AUTH/TLS gate or metrics_http's own mux", "Peer nodes are separate processes, network-only, exempt from client ACL"] },
+    { "dot": "emerald", "title": "Durability", "items": ["WAL append happens before the in-memory mutation", "Replication is per-shard via the hash ring, not full-database; every op carries a fencing epoch"] },
+    { "dot": "amber", "title": "Self-healing & limits", "items": ["Phi-accrual detection + simplified Raft election + SWIM gossip", "No Cluster protocol, no pub/sub, strings only — see COMMANDS.md"] }
+  ]
+}
