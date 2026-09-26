@@ -3,8 +3,8 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/hydracache/hydracache.git
-cd hydracache
+git clone https://github.com/arpit1021-ux/HydraCache.git
+cd HydraCache
 go mod tidy
 ```
 

@@ -4,8 +4,7 @@
 
 **A self-healing distributed in-memory cache with automatic failover**
 
-[![CI](https://github.com/hydracache/hydracache/actions/workflows/ci.yml/badge.svg)](https://github.com/hydracache/hydracache/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/hydracache/hydracache)](https://goreportcard.com/report/github.com/hydracache/hydracache)
+[![CI](https://github.com/arpit1021-ux/HydraCache/actions/workflows/ci.yml/badge.svg)](https://github.com/arpit1021-ux/HydraCache/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev/)
 
@@ -80,8 +79,8 @@ Every component is built from first principles. No Redis source code copied. No 
 ### Docker (recommended)
 
 ```bash
-git clone https://github.com/hydracache/hydracache.git
-cd hydracache
+git clone https://github.com/arpit1021-ux/HydraCache.git
+cd HydraCache
 docker compose up -d
 ```
 
