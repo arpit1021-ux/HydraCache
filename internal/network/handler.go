@@ -1162,20 +1162,22 @@ type SyncResult struct {
 	LastSeq int64                   `json:"last_seq"`
 }
 
-// handleReplicaSync processes a REPLICA_SYNC command from a reconnecting
-// replica. The replica sends its last known seq; the primary responds with
-// the gap operations or a FULL_SYNC signal.
+// handleReplicaSync processes a REPLICA_SYNC command: the caller sends its
+// last known seq, and the primary responds with the gap operations or a
+// FULL_SYNC signal if the gap exceeds the retention buffer.
 //
-// KNOWN SCOPE BOUNDARY — PULL PATH UNREACHABLE:
-// This handler implements the PRIMARY-SIDE of the REPLICA_SYNC pull protocol
-// (replica → primary). However, NO client-side caller exists yet: no
-// reconnecting replica ever sends REPLICA_SYNC to a primary. The initial
-// sync for newly-added replicas is handled by the PRIMARY-PUSH path in
-// Manager.initiateReplicaSync (which uses REPLICATE/SET commands directly).
-// The REPLICA_SYNC pull path is intentionally preserved for a future
-// reconnecting-replica feature but is currently dead code from the caller's
-// perspective. If you see this handler executing, something external is
-// sending REPLICA_SYNC commands — that path is not wired by this codebase.
+// SCOPE: this is reached today only from catchUpGapLocked, when
+// handleReplicate detects a replica has missed one or more ops mid-stream
+// (op.Seq skips ahead of what's been applied) — a replica that's still
+// connected and actively replicating, just briefly behind. It is NOT used
+// for the initial sync of a newly-added replica (that's the PRIMARY-PUSH
+// path in Manager.initiateReplicaSync, using REPLICATE/SET commands
+// directly), and there is no separate mechanism today for a replica that
+// fully disconnected and is reconnecting from scratch to pull its own
+// catch-up — such a replica would need to be re-added via the same
+// initial-sync path, not this one. An earlier version of this comment
+// claimed this handler had no caller at all; that stopped being true once
+// catchUpGapLocked was added and was left uncorrected until this comment.
 func (h *Handler) handleReplicaSync(cmd *protocol.Command) *Response {
 	if len(cmd.Args) == 0 {
 		return &Response{err: fmt.Errorf("REPLICA_SYNC requires lastKnownSeq")}

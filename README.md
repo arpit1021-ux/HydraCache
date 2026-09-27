@@ -175,6 +175,10 @@ hydracache/
 | [API Reference](docs/API.md) | HTTP API endpoints and protocol details |
 | [Command Reference](COMMANDS.md) | Exactly what's implemented, partial, or unsupported over RESP |
 | [Reference Application](examples/readthrough/README.md) | Read-through cache over Postgres, with live node control |
+| [Operations Guide](OPERATIONS.md) | Deploying, monitoring, node lifecycle, backup/restore, troubleshooting |
+| [Changelog](CHANGELOG.md) | What's changed, grouped by category |
+| [Interview Prep](INTERVIEW_PREP.md) | A from-scratch technical walkthrough of the whole system |
+| [Kubernetes Deployment](deploy/k8s/README.md) | 5-node StatefulSet manifests, and what's verified about them |
 
 ---
 

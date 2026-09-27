@@ -743,16 +743,21 @@ missing range from the primary via `REPLICA_SYNC` and applies them in order
 *before* applying the new one, rather than either dropping the gap silently
 or applying out of order.
 
-**A known, honestly-scoped limitation worth naming if asked:** the
-`REPLICA_SYNC` *pull* path (a reconnecting replica proactively asking "what
-did I miss since sequence N?") is fully implemented on the primary side
-(`handleReplicaSync`) but has **no caller** anywhere in the codebase — the
-initial sync for a newly-added replica uses a different, primary-*push*
-mechanism instead. This is explicitly documented in the code itself as
-"KNOWN SCOPE BOUNDARY — PULL PATH UNREACHABLE" rather than left as a silent
-gap. Being able to point at your own code and say "I know this exists,
-here's exactly why it's not wired up yet, and here's what wiring it up would
-take" is a strong answer if an interviewer probes for gaps.
+**A real scope boundary worth naming precisely, not just "there's a gap
+somewhere":** `REPLICA_SYNC` is used for exactly one scenario —
+`catchUpGapLocked` calling it when a replica that's *still connected and
+actively replicating* falls a few ops behind. It is **not** used for the
+initial sync of a newly-added replica (that's a separate, primary-*push*
+mechanism, `Manager.initiateReplicaSync`), and there is no mechanism today
+for a replica that fully *disconnected* and is reconnecting from scratch to
+pull its own catch-up that way — such a replica would need to be re-added
+through the initial-sync path instead. (An earlier version of this
+project's own code comment on `handleReplicaSync` claimed the whole RPC had
+no caller at all — that was true before `catchUpGapLocked` existed and
+became stale once it was added; catching and fixing exactly that kind of
+drift between a comment and what the code actually does, in your own code,
+is itself a fair example to have ready if asked about reviewing your own
+work critically.)
 
 ### Q&A: Replication
 
@@ -2052,10 +2057,11 @@ you can say in this entire interview.
    sorted sets).
 5. **Writes to a non-primary node aren't replicated** — the single most
    significant gap, discussed in depth in 4.5, 4.14, and Part 6.
-6. **The `REPLICA_SYNC` pull path exists but is unreachable** — implemented
-   correctly on the primary side, with zero callers anywhere, documented
-   directly in the code as a known scope boundary rather than silently
-   dead. See 4.5.
+6. **A fully disconnected, reconnecting replica has no way to catch up on
+   its own** — `REPLICA_SYNC` only fires today for a replica that's still
+   connected and briefly behind (`catchUpGapLocked`), not for one that
+   dropped entirely and came back; that case has to go through the
+   initial-sync path again, as if it were a brand-new replica. See 4.5.
 7. **No mutual-TLS peer-identity verification** — TLS/mTLS infrastructure
    exists and works, but a connecting peer's *specific* certificate identity
    isn't checked against an expected peer list yet. See 4.10's Q&A.
