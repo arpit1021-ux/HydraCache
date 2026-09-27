@@ -106,6 +106,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # Without a pattern, this also picks up the incidental
+          # "<repo>.dockerbuild" artifact docker/build-push-action's build
+          # summary feature generates on its own — found on this
+          # workflow's actual first run, where it failed to download
+          # cleanly and took the whole job down with it, even though every
+          # real hydracache-* binary artifact downloaded fine right before
+          # it. Restricting to our own naming keeps this job's success
+          # from depending on an artifact we never asked for and don't use.
+          pattern: hydracache-*
           merge-multiple: true
       - name: Create release
         uses: softprops/action-gh-release@v2
