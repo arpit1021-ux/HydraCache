@@ -3,16 +3,15 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-This project has not yet cut a tagged release (no `v*.*.*` tag exists as of
-writing this file — see `.github/workflows/release.yml`, which is built and
-validated but has never actually run). Everything below is grouped under
-**[Unreleased]** for that reason, with sub-sections by category rather than
-by commit, since a raw commit-by-commit list would include a lot of
-in-the-moment lint fixes and flake-chasing that aren't meaningful to anyone
-reading this file to understand *what the system does*. The full,
-unfiltered history is always `git log --oneline`.
+Entries are grouped by category rather than by commit, since a raw
+commit-by-commit list would include a lot of in-the-moment lint fixes and
+flake-chasing that aren't meaningful to anyone reading this file to
+understand *what the system does*. The full, unfiltered history is always
+`git log --oneline`.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-09-27
 
 ### Added
 

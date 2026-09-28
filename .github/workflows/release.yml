@@ -1,10 +1,10 @@
 name: Release
 
-# Triggered only by pushing a tag matching v*.*.* (e.g. v1.0.0). This repo
-# has no such tag yet as of writing this workflow — it was authored and
-# YAML/action-reference checked, but never actually exercised by pushing a
-# real tag, so "this workflow is correct" and "this workflow has produced a
-# real release" are different claims; only the first one is made here.
+# Triggered only by pushing a tag matching v*.*.* (e.g. v1.0.0). Exercised
+# for real by the v1.0.0 tag: the first run failed on an incidental
+# artifact from docker/build-push-action's own build-summary feature
+# (fixed below by the `pattern: hydracache-*` filter), the second run was
+# fully green, and all 5 binaries plus the multi-arch GHCR image are live.
 on:
   push:
     tags:
